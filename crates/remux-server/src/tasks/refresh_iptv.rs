@@ -163,12 +163,44 @@ impl Task for RefreshIptvTask {
         let epg_progress = progress.scaled(50.0, 100.0);
         let client = reqwest::Client::new();
 
-        for (idx, (runtime, _)) in iptv_runtimes
-            .iter()
-            .enumerate()
-        {
-            epg_progress.report(idx, iptv_runtimes.len());
+        // Programmes are matched by `tvg_id`, so a guide configured in the
+        // admin panel applies to every enabled channel, whichever addon
+        // imported it.
+        let all_channels: Vec<(Uuid, Option<String>)> = sqlx::query_as(
+            "SELECT id, tvg_id FROM media \
+             WHERE kind = 'tv_channel' AND enabled = TRUE AND tvg_id IS NOT NULL",
+        )
+        .fetch_all(&ctx.db)
+        .await
+        .unwrap_or_default();
 
+        let mut sources: Vec<(String, String, Vec<(Uuid, Option<String>)>)> =
+            Vec::new();
+        let mut seen_urls: HashSet<String> = HashSet::new();
+        let mut add_source =
+            |id: String, url: String, channels: Vec<(Uuid, Option<String>)>| {
+                if channels.is_empty() || !seen_urls.insert(url.clone()) {
+                    return;
+                }
+                sources.push((id, url, channels));
+            };
+
+        match db::EpgSource::get_all(&ctx.db).await {
+            Ok(rows) => {
+                for row in rows {
+                    add_source(
+                        row.id
+                            .simple()
+                            .to_string(),
+                        row.url,
+                        all_channels.clone(),
+                    );
+                }
+            }
+            Err(e) => warn!(error = %e, "failed to load EPG sources"),
+        }
+
+        for (runtime, _) in iptv_runtimes.iter() {
             let addon_id = runtime
                 .row
                 .id;
@@ -221,17 +253,34 @@ impl Task for RefreshIptvTask {
             .await
             .unwrap_or_default();
 
-            if channel_refs.is_empty() {
-                debug!(addon = %addon_id, "no channels found for EPG import, skipping");
-                continue;
-            }
+            add_source(source_id, epg_url, channel_refs);
+        }
+        drop(add_source);
 
-            debug!(addon = %addon_id, channels = channel_refs.len(), url = %crate::playback::probe::redact_url(&epg_url), "fetching EPG");
-            match crate::iptv::stream_import_epg(&client, &epg_url, &channel_refs, &ctx)
-                .await
+        if sources.is_empty() {
+            debug!("no EPG sources configured, skipping guide import");
+        }
+
+        for (idx, (source_id, url, channels)) in sources
+            .iter()
+            .enumerate()
+        {
+            epg_progress.report(idx, sources.len());
+            debug!(
+                source = %source_id,
+                channels = channels.len(),
+                url = %crate::playback::probe::redact_url(url),
+                "fetching EPG"
+            );
+            match crate::iptv::stream_import_epg(
+                &client, url, source_id, channels, &ctx,
+            )
+            .await
             {
-                Ok(count) => info!(addon = %addon_id, programs = count, "imported EPG"),
-                Err(e) => warn!(addon = %addon_id, error = %e, "failed to fetch EPG"),
+                Ok(count) => {
+                    info!(source = %source_id, programs = count, "imported EPG")
+                }
+                Err(e) => warn!(source = %source_id, error = %e, "failed to fetch EPG"),
             }
         }
 

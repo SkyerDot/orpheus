@@ -313,6 +313,12 @@ fn channel_to_media(
             .tvg_id
             .clone(),
         channel_number: ch.channel_number,
+        country: ch
+            .country
+            .clone(),
+        original_language: ch
+            .language
+            .clone(),
         external_ids: db::ExternalIds {
             iptv_source_id: Some(source_id.to_owned()),
             iptv_group: ch
@@ -490,19 +496,99 @@ impl CatalogAddon for IptvAddon {
 #[async_trait]
 impl StreamAddon for IptvAddon {
     fn supports(&self, media: &db::Media) -> bool {
-        media.kind == db::MediaKind::TvChannel
+        matches!(
+            media.kind,
+            db::MediaKind::TvChannel | db::MediaKind::TvProgram
+        )
     }
 
     async fn get_streams(
         &self,
         media: &db::Media,
-        _ctx: &AppContext,
+        ctx: &AppContext,
         _id_prefixes: Option<&[String]>,
     ) -> Result<Vec<crate::stream::StreamInfo>> {
+        if media.kind == db::MediaKind::TvProgram {
+            return self
+                .program_streams(media, ctx)
+                .await;
+        }
         let Some(ref si) = media.stream_info else {
             return Ok(vec![]);
         };
         Ok(vec![si.clone()])
+    }
+}
+
+impl IptvAddon {
+    /// A past programme plays from the channel's catch-up archive. The
+    /// programme carries no stream of its own, so it borrows the channel's
+    /// `catchup-source` (or live URL) and substitutes the programme's window.
+    async fn program_streams(
+        &self,
+        media: &db::Media,
+        ctx: &AppContext,
+    ) -> Result<Vec<crate::stream::StreamInfo>> {
+        let Some(parent_id) = media.parent_id else {
+            return Ok(vec![]);
+        };
+        let Some(channel) = db::Media::get_by_id(&ctx.db, &parent_id).await? else {
+            return Ok(vec![]);
+        };
+        if channel.kind != db::MediaKind::TvChannel {
+            return Ok(vec![]);
+        }
+        // A channel imported by another addon keeps its own archive rules.
+        let source_id = self.source_id();
+        if channel
+            .external_ids
+            .iptv_source_id
+            .as_deref()
+            != Some(source_id.as_str())
+        {
+            return Ok(vec![]);
+        }
+        let Some(info) = channel
+            .stream_info
+            .as_ref()
+        else {
+            return Ok(vec![]);
+        };
+        let now = chrono::Utc::now().naive_utc();
+        // A programme that has not ended yet is still live: play the channel
+        // itself, not a fixed archive window from its start.
+        if media
+            .live_end
+            .is_some_and(|end| end > now)
+        {
+            return Ok(vec![info.clone()]);
+        }
+        let Some(channel_url) = info
+            .descriptor
+            .as_http_url()
+        else {
+            return Ok(vec![]);
+        };
+        let Some(url) = iptv::catchup_url(
+            channel_url,
+            info.catchup_source
+                .as_deref(),
+            info.catchup_days,
+            media.live_start,
+            media.live_end,
+            now,
+        ) else {
+            return Ok(vec![]);
+        };
+        Ok(vec![crate::stream::StreamInfo {
+            descriptor: crate::stream::StreamDescriptor::http(url),
+            name: Some(
+                media
+                    .title
+                    .clone(),
+            ),
+            ..Default::default()
+        }])
     }
 }
 
@@ -603,6 +689,165 @@ mod tests {
         assert_eq!(enabled(xtream(Some(false))).await, vec![false]);
         assert_eq!(enabled(m3u(Some(true))).await, vec![true]);
         assert_eq!(enabled(xtream(Some(true))).await, vec![true]);
+    }
+
+    #[tokio::test]
+    async fn a_past_programme_plays_from_the_channels_archive() {
+        let (_server, guard) = crate::integration_test::new_test_server()
+            .await
+            .unwrap();
+        let ctx = &guard.0;
+        let addon_id = Uuid::new_v4();
+        let channel_id = Uuid::new_v4();
+        db::Media {
+            id: channel_id,
+            title: "Channel 1".into(),
+            kind: db::MediaKind::TvChannel,
+            enabled: true,
+            stream_info: Some(crate::stream::StreamInfo {
+                descriptor: crate::stream::StreamDescriptor::http(
+                    "http://provider/live/user/pass/1",
+                ),
+                catchup_source: Some(
+                    "http://cdn/archive?start={utc}&end={utcend}".into(),
+                ),
+                catchup_days: Some(7),
+                ..Default::default()
+            }),
+            external_ids: db::ExternalIds {
+                iptv_source_id: Some(
+                    addon_id
+                        .simple()
+                        .to_string(),
+                ),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+        .save(&ctx.db)
+        .await
+        .unwrap();
+        let addon = IptvAddon {
+            addon_id,
+            m3u_url: "http://provider/list.m3u".into(),
+            epg_url: None,
+            xtream_username: None,
+            xtream_password: None,
+            is_xtream: false,
+            sync_vod: false,
+            sync_series: false,
+            enable_new_channels: false,
+        };
+        let now = chrono::Utc::now().naive_utc();
+        let start = now - chrono::Duration::hours(2);
+        let program =
+            |start: chrono::NaiveDateTime, end: chrono::NaiveDateTime| db::Media {
+                id: Uuid::new_v4(),
+                title: "Evening news".into(),
+                kind: db::MediaKind::TvProgram,
+                parent_id: Some(channel_id),
+                live_start: Some(start),
+                live_end: Some(end),
+                ..Default::default()
+            };
+
+        let streams = addon
+            .get_streams(
+                &program(start, start + chrono::Duration::hours(1)),
+                ctx,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(streams.len(), 1);
+        let url = streams[0]
+            .descriptor
+            .as_http_url()
+            .unwrap();
+        assert!(url.contains(&format!(
+            "start={}",
+            start
+                .and_utc()
+                .timestamp()
+        )));
+
+        // Not started yet: the guide entry is live, so it plays the channel.
+        let live = addon
+            .get_streams(
+                &program(
+                    now + chrono::Duration::hours(1),
+                    now + chrono::Duration::hours(2),
+                ),
+                ctx,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(live.len(), 1);
+        assert_eq!(
+            live[0]
+                .descriptor
+                .as_http_url(),
+            Some("http://provider/live/user/pass/1")
+        );
+    }
+
+    #[tokio::test]
+    async fn another_addons_channel_has_no_catchup_here() {
+        let (_server, guard) = crate::integration_test::new_test_server()
+            .await
+            .unwrap();
+        let ctx = &guard.0;
+        let channel_id = Uuid::new_v4();
+        db::Media {
+            id: channel_id,
+            title: "Channel 1".into(),
+            kind: db::MediaKind::TvChannel,
+            enabled: true,
+            stream_info: Some(crate::stream::StreamInfo {
+                descriptor: crate::stream::StreamDescriptor::http(
+                    "http://provider/live/1",
+                ),
+                catchup_days: Some(7),
+                ..Default::default()
+            }),
+            external_ids: db::ExternalIds {
+                iptv_source_id: Some("other-addon".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+        .save(&ctx.db)
+        .await
+        .unwrap();
+        let addon = IptvAddon {
+            addon_id: Uuid::new_v4(),
+            m3u_url: "http://provider/list.m3u".into(),
+            epg_url: None,
+            xtream_username: None,
+            xtream_password: None,
+            is_xtream: false,
+            sync_vod: false,
+            sync_series: false,
+            enable_new_channels: false,
+        };
+        let now = chrono::Utc::now().naive_utc();
+        let program = db::Media {
+            id: Uuid::new_v4(),
+            title: "Evening news".into(),
+            kind: db::MediaKind::TvProgram,
+            parent_id: Some(channel_id),
+            live_start: Some(now - chrono::Duration::hours(2)),
+            live_end: Some(now - chrono::Duration::hours(1)),
+            ..Default::default()
+        };
+        assert!(
+            addon
+                .get_streams(&program, ctx, None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]

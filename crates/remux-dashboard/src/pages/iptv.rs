@@ -1,19 +1,224 @@
 use crate::{
-    components::{FormGroup, LoadingText, Modal, PaginationBar, Switch},
+    components::{
+        ConfirmDialog, EmptyState, FormGroup, LoadingText, Modal, PaginationBar, Switch,
+    },
     state::AppState,
 };
 use dioxus::prelude::*;
 use remux_sdks::remux::{
-    BulkChannelRequest, BulkChannels, ChannelEditorItem, GetIptvChannelCountries,
-    GetIptvChannelGroups, GetIptvChannels, PatchChannel, PatchChannelRequest,
+    BulkChannelRequest, BulkChannels, ChannelEditorItem, DeleteEpgSource,
+    EpgSourceInfo, GetEpgSources, GetIptvChannelCountries, GetIptvChannelGroups,
+    GetIptvChannels, PatchChannel, PatchChannelRequest, SaveEpgSource, SourceUrl,
 };
 
 pub const PAGE_SIZE: u32 = 50;
 
 #[component]
 pub fn IptvPage(app_state: AppState) -> Element {
+    let mut tab = use_signal(|| "channels".to_string());
     rsx! {
-        IptvChannelsTab { app_state }
+        div { class: "tab-group", style: "margin-bottom:12px",
+            button {
+                class: if *tab.read() == "channels" { "tab-btn active" } else { "tab-btn" },
+                onclick: move |_| tab.set("channels".to_string()),
+                "Channels"
+            }
+            button {
+                class: if *tab.read() == "epg" { "tab-btn active" } else { "tab-btn" },
+                onclick: move |_| tab.set("epg".to_string()),
+                "EPG Sources"
+            }
+        }
+        if *tab.read() == "channels" {
+            IptvChannelsTab { app_state }
+        } else {
+            IptvEpgTab { app_state }
+        }
+    }
+}
+
+#[component]
+fn IptvEpgTab(app_state: AppState) -> Element {
+    let mut sources: Signal<Vec<EpgSourceInfo>> = use_signal(Vec::new);
+    let mut loading = use_signal(|| true);
+    let mut error = use_signal(|| Option::<String>::None);
+    let mut saving = use_signal(|| false);
+    let mut name = use_signal(String::new);
+    let mut url = use_signal(String::new);
+    // Bumped after a save or delete to re-fetch the list.
+    let mut reload = use_signal(|| 0_u32);
+    let mut confirm_delete: Signal<Option<String>> = use_signal(|| None);
+
+    let app_state_list = app_state.clone();
+    use_effect(move || {
+        let _ = *reload.read();
+        let client = app_state_list.clone();
+        loading.set(true);
+        spawn(async move {
+            match client
+                .execute(GetEpgSources)
+                .await
+            {
+                Ok(list) => {
+                    sources.set(list);
+                    error.set(None);
+                }
+                Err(e) => error.set(Some(format!("Failed to load EPG sources: {e}"))),
+            }
+            loading.set(false);
+        });
+    });
+
+    let can_add = !name
+        .read()
+        .trim()
+        .is_empty()
+        && !url
+            .read()
+            .trim()
+            .is_empty()
+        && !*saving.read();
+
+    rsx! {
+        div { class: "card",
+            div { class: "card-header",
+                span { class: "card-title", "EPG Sources" }
+                if !sources.read().is_empty() {
+                    span { style: "font-size:.75rem;opacity:.5;margin-left:8px",
+                        "{sources.read().len()} total"
+                    }
+                }
+            }
+            div { class: "card-body tight",
+                if *loading.read() {
+                    LoadingText {}
+                } else if let Some(err) = error.read().as_ref() {
+                    span { class: "loading-text", style: "color:var(--error)", "{err}" }
+                } else if sources.read().is_empty() {
+                    EmptyState { message: "No EPG sources yet. Add an XMLTV guide URL to fill the channel guide." }
+                } else {
+                    div { class: "row-list",
+                        for source in sources.read().clone() {
+                            {
+                                let id = source.id.clone().unwrap_or_default();
+                                let row_id = id.clone();
+                                rsx! {
+                                    div {
+                                        key: "{id}",
+                                        class: "flex items-center border-b border-[var(--border)]",
+                                        style: "gap:8px;padding:8px 12px",
+                                        div { class: "flex-1 min-w-0",
+                                            div { style: "font-size:.82rem;font-weight:500", "{source.name}" }
+                                            div {
+                                                style: "font-size:.72rem;opacity:.6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis",
+                                                "{source.url}"
+                                            }
+                                        }
+                                        button {
+                                            class: "btn btn-ghost",
+                                            style: "height:28px;font-size:.7rem",
+                                            onclick: move |_| confirm_delete.set(Some(row_id.clone())),
+                                            "Remove"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            div { class: "card-body",
+                div { style: "font-size:.72rem;opacity:.6;margin-bottom:8px",
+                    "Programmes are matched to channels by tvg-id. A guide here applies to every enabled channel, whichever addon imported it."
+                }
+                FormGroup { label: "Source name",
+                    input {
+                        class: "form-input",
+                        r#type: "text",
+                        placeholder: "e.g. Provider guide",
+                        value: "{name.read()}",
+                        oninput: move |e| name.set(e.value()),
+                    }
+                }
+                FormGroup { label: "XMLTV URL",
+                    input {
+                        class: "form-input",
+                        r#type: "text",
+                        placeholder: "https://provider/guide.xml",
+                        value: "{url.read()}",
+                        oninput: move |e| url.set(e.value()),
+                    }
+                }
+                button {
+                    class: "btn btn-primary",
+                    disabled: !can_add,
+                    onclick: {
+                        let client = app_state.clone();
+                        move |_| {
+                            let source_name = name.peek().trim().to_string();
+                            let raw_url = url.peek().trim().to_string();
+                            let Ok(source_url) = SourceUrl::try_new(raw_url) else {
+                                error.set(Some("Enter a valid EPG URL.".to_string()));
+                                return;
+                            };
+                            let c = client.clone();
+                            saving.set(true);
+                            spawn(async move {
+                                let result = c
+                                    .execute(SaveEpgSource {
+                                        info: EpgSourceInfo {
+                                            id: None,
+                                            name: source_name,
+                                            url: source_url,
+                                        },
+                                    })
+                                    .await;
+                                match result {
+                                    Ok(_) => {
+                                        name.set(String::new());
+                                        url.set(String::new());
+                                        error.set(None);
+                                        let next = *reload.peek() + 1;
+                                        reload.set(next);
+                                    }
+                                    Err(e) => error.set(Some(format!("Failed to save EPG source: {e}"))),
+                                }
+                                saving.set(false);
+                            });
+                        }
+                    },
+                    if *saving.read() { "Adding…" } else { "Add source" }
+                }
+            }
+        }
+
+        if let Some(id) = confirm_delete.read().clone() {
+            ConfirmDialog {
+                message: "Remove this EPG source? Programmes it already imported stay in the guide until the next refresh."
+                    .to_string(),
+                on_confirm: {
+                    let client = app_state.clone();
+                    move |_| {
+                        let c = client.clone();
+                        let id = id.clone();
+                        let mut cd = confirm_delete;
+                        let mut rl = reload;
+                        let mut err = error;
+                        spawn(async move {
+                            match c.execute(DeleteEpgSource { id }).await {
+                                Ok(_) => {
+                                    cd.set(None);
+                                    let next = *rl.peek() + 1;
+                                    rl.set(next);
+                                }
+                                Err(e) => err.set(Some(format!("Failed to remove EPG source: {e}"))),
+                            }
+                        });
+                    }
+                },
+                on_cancel: move |_| confirm_delete.set(None),
+            }
+        }
     }
 }
 

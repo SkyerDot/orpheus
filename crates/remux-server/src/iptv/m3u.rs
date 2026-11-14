@@ -22,10 +22,11 @@ pub struct M3uChannel {
     /// Derived from group-title (and Xtream category for Xtream sources)
     pub program_kind: Option<ProgramKind>,
     /// tvg-language attribute
-    #[allow(dead_code)] // parsed from the playlist; not used yet
     pub language: Option<String>,
+    /// tvg-country attribute (ISO 3166-1 alpha-2, or a provider's free text)
+    pub country: Option<String>,
     /// Catchup type (e.g. "default", "append", "shift", "flussonic")
-    #[allow(dead_code)] // parsed from the playlist; not used yet
+    #[allow(dead_code)] // only `catchup-source`/`catchup-days` decide the URL
     pub catchup: Option<String>,
     /// Number of days of catchup content available
     pub catchup_days: Option<i64>,
@@ -95,6 +96,8 @@ fn parse_extinf(line: &str) -> M3uChannel {
                 .ok()
         });
     let language = extract_attr(attrs_part, "tvg-language");
+    let country = extract_attr(attrs_part, "tvg-country")
+        .or_else(|| extract_attr(attrs_part, "tvg-country-code"));
     let catchup = extract_attr(attrs_part, "catchup");
     let catchup_days = extract_attr(attrs_part, "catchup-days").and_then(|s| {
         s.parse::<i64>()
@@ -113,6 +116,7 @@ fn parse_extinf(line: &str) -> M3uChannel {
         url: String::new(),
         program_kind,
         language,
+        country,
         catchup,
         catchup_days,
         catchup_source,
@@ -180,5 +184,31 @@ mod tests {
         assert_eq!(channels[0].name, "Channel 1");
         assert_eq!(channels[0].url, "http://stream/1");
         assert_eq!(channels[1].channel_number, Some(2));
+    }
+
+    #[tokio::test]
+    async fn test_parse_language_and_country() {
+        let m3u = "#EXTM3U\n\
+            #EXTINF:-1 tvg-id=\"ch1\" tvg-language=\"Portuguese\" tvg-country=\"BR\",Channel 1\n\
+            http://stream/1\n";
+        let resp = reqwest::Response::from(http::Response::new(
+            m3u.as_bytes()
+                .to_vec(),
+        ));
+        let channels = parse_m3u_stream(resp)
+            .await
+            .unwrap();
+        assert_eq!(
+            channels[0]
+                .language
+                .as_deref(),
+            Some("Portuguese")
+        );
+        assert_eq!(
+            channels[0]
+                .country
+                .as_deref(),
+            Some("BR")
+        );
     }
 }

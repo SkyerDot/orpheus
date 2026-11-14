@@ -201,6 +201,7 @@ fn stream_to_channel(
         url: stream_url,
         program_kind,
         language: None,
+        country: None,
         catchup: None,
         catchup_days: None,
         catchup_source: None,

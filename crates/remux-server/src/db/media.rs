@@ -20,8 +20,8 @@ use crate::{
 };
 use anyhow::{Context, Result, anyhow};
 use chrono::{Duration, NaiveDateTime, Utc, prelude::*};
-use rand::rngs::SmallRng;
 use rand::SeedableRng;
+use rand::rngs::SmallRng;
 use rand::seq::SliceRandom;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -1055,6 +1055,10 @@ pub struct ExternalIds {
     pub youtube_id: Option<String>,
     pub iptv_source_id: Option<String>,
     pub iptv_group: Option<String>,
+    /// EPG source that wrote a `tv_program` row. Scopes pruning so importing a
+    /// second guide for the same channels keeps the first one's programmes.
+    #[serde(default)]
+    pub epg_source_id: Option<String>,
     /// Raw addon-specific ID for content that has no IMDB/TMDB/TVDB equivalent.
     /// Derived from the Stremio `meta.id` when no known provider prefix matches.
     pub custom_stremio_id: Option<String>,
@@ -4717,11 +4721,23 @@ impl Media {
             }
 
             if let Some(studio_ids) = &filter.studio_ids {
-                push_related_to_any(qb, studio_ids, filter.kind.as_deref());
+                push_related_to_any(
+                    qb,
+                    studio_ids,
+                    filter
+                        .kind
+                        .as_deref(),
+                );
             }
 
             if let Some(person_ids) = &filter.person_ids {
-                push_related_to_any(qb, person_ids, filter.kind.as_deref());
+                push_related_to_any(
+                    qb,
+                    person_ids,
+                    filter
+                        .kind
+                        .as_deref(),
+                );
             }
 
             // GetItemsQuery.tags: item must have ANY of these tags
@@ -5281,9 +5297,15 @@ impl Media {
                     // For RANDOM sampling, don't add ORDER BY RANDOM().
                     // Instead, we'll fetch a larger batch and sample in Rust.
                     // Increase LIMIT to fetch a larger pool for sampling.
-                    let limit = filter.limit.unwrap_or(100) as u32;
-                    let pool_size = (limit * 10).min(1000).max(limit);
-                    records_qb.push(" LIMIT ").push_bind(pool_size);
+                    let limit = filter
+                        .limit
+                        .unwrap_or(100) as u32;
+                    let pool_size = (limit * 10)
+                        .min(1000)
+                        .max(limit);
+                    records_qb
+                        .push(" LIMIT ")
+                        .push_bind(pool_size);
                 } else {
                     records_qb.push(" ORDER BY ");
                     records_qb.push(order_clauses.join(", "));
@@ -5374,8 +5396,12 @@ impl Media {
             .iter()
             .any(|s| matches!(s, api::ItemSortBy::Random));
         if is_random_sampling {
-            let limit = filter.limit.unwrap_or(100) as usize;
-            let pool_size = (limit * 10).min(1000).max(limit);
+            let limit = filter
+                .limit
+                .unwrap_or(100) as usize;
+            let pool_size = (limit * 10)
+                .min(1000)
+                .max(limit);
             if records.len() > pool_size {
                 // Truncate to pool size before sampling
                 records.truncate(pool_size);
@@ -15019,7 +15045,11 @@ mod genre_ids_filter_tests {
         let mut qb = sqlx::QueryBuilder::new(
             "EXPLAIN QUERY PLAN SELECT id FROM media WHERE 1=1",
         );
-        push_related_to_any(&mut qb, &person_ids, Some(&[MediaKind::Movie, MediaKind::Series]));
+        push_related_to_any(
+            &mut qb,
+            &person_ids,
+            Some(&[MediaKind::Movie, MediaKind::Series]),
+        );
         let plan = qb
             .build()
             .fetch_all(&db)
@@ -15046,7 +15076,9 @@ mod genre_ids_filter_tests {
         // lookup by PK. The plan format lists outer query first, then subquery
         // steps. We verify the subquery starts with SEARCH mr.
         assert!(
-            plan.contains("| SEARCH mr USING COVERING INDEX idx_media_relations_right_left"),
+            plan.contains(
+                "| SEARCH mr USING COVERING INDEX idx_media_relations_right_left"
+            ),
             "subquery must start from relation table; plan: {plan}"
         );
     }

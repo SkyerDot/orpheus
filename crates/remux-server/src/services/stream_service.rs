@@ -1374,7 +1374,9 @@ impl StreamService {
             &ctx.db,
             user,
             &media,
-            audio_lang.as_ref().map(|lt| lt.code()),
+            audio_lang
+                .as_ref()
+                .map(|lt| lt.code()),
             subtitle_choice.as_ref(),
         )
         .await
