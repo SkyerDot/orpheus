@@ -197,6 +197,40 @@ pub fn AddonsPage(app_state: AppState) -> Element {
                                             div { class: "addon-card-header",
                                                 span { class: "addon-card-name", "{addon.name}" }
                                                 span { class: "addon-card-kind", "{addon.kind}" }
+                                                div { style: "margin-left:auto;display:flex;align-items:center;gap:8px",
+                                                    span { style: "font-size:.62rem;opacity:.5",
+                                                        if addon.enabled { "Enabled" } else { "Disabled" }
+                                                    }
+                                                    Switch {
+                                                        checked: addon.enabled,
+                                                        on_change: {
+                                                            let client = app_state.clone();
+                                                            let mut list = tab_addons;
+                                                            move |enabled: bool| {
+                                                                // Optimistic: the toggle is the control the admin is using.
+                                                                if let Some(a) = list.write().iter_mut().find(|a| a.id == id) {
+                                                                    a.enabled = enabled;
+                                                                }
+                                                                let c = client.clone();
+                                                                let mut err = error;
+                                                                spawn(async move {
+                                                                    if let Err(e) = c
+                                                                        .execute(UpdateAddon {
+                                                                            id,
+                                                                            payload: UpdateAddonRequest {
+                                                                                enabled: Some(enabled),
+                                                                                ..Default::default()
+                                                                            },
+                                                                        })
+                                                                        .await
+                                                                    {
+                                                                        err.set(Some(format!("Failed to toggle addon: {e}")));
+                                                                    }
+                                                                });
+                                                            }
+                                                        },
+                                                    }
+                                                }
                                             }
                                             if let Some(desc) = addon.description.as_deref().filter(|d| !d.is_empty()) {
                                                 div { class: "addon-kind-card-desc", "{desc}" }
