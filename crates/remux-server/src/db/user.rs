@@ -1235,7 +1235,7 @@ impl UserMediaState {
         remux_sdks::remux::RememberedLanguages {
             audio: audio
                 .as_deref()
-                .and_then(remux_sdks::remux::lang_to_two_letter),
+                .and_then(remux_sdks::remux::LanguageTag::parse),
             subtitle: subtitle
                 .as_deref()
                 .and_then(remux_sdks::remux::RememberedSubtitle::parse),
@@ -2462,7 +2462,8 @@ mod identity_reattach_tests {
         assert_eq!(
             for_c
                 .audio
-                .as_deref(),
+                .as_ref()
+                .map(|lt| lt.code()),
             Some("en")
         );
         // Audio and subtitles look separately: only `a` ever chose subtitles.
@@ -2473,7 +2474,8 @@ mod identity_reattach_tests {
         assert_eq!(
             for_a
                 .audio
-                .as_deref(),
+                .as_ref()
+                .map(|lt| lt.code()),
             Some("fr")
         );
     }

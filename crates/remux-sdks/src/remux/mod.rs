@@ -2790,39 +2790,58 @@ pub struct MediaSourceInfo {
 }
 
 /// What the user last chose for subtitles: none at all, or a language.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Uses `LanguageTag` to preserve regional variants (e.g., "pt-BR" vs "pt-PT").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RememberedSubtitle {
     Off,
-    Language(String),
+    Language(LanguageTag),
 }
 
 impl RememberedSubtitle {
     const OFF: &'static str = "off";
 
-    /// The stored form: `off`, or a two-letter language code.
+    /// The stored form: `off`, or a language tag (e.g., "pt-BR", "pt", "eng").
     pub fn parse(stored: &str) -> Option<Self> {
         let stored = stored.trim();
         if stored.eq_ignore_ascii_case(Self::OFF) {
             Some(Self::Off)
         } else {
-            lang_to_two_letter(stored).map(Self::Language)
+            LanguageTag::parse(stored).map(Self::Language)
         }
     }
 
     pub fn as_stored(&self) -> &str {
         match self {
             Self::Off => Self::OFF,
-            Self::Language(lang) => lang,
+            Self::Language(lt) => &lt.original,
+        }
+    }
+
+    /// Returns the two-letter language code for matching purposes.
+    pub fn code(&self) -> Option<&str> {
+        match self {
+            Self::Off => None,
+            Self::Language(lt) => Some(lt.code()),
+        }
+    }
+
+    /// Returns the region if present.
+    pub fn region(&self) -> Option<&str> {
+        match self {
+            Self::Off => None,
+            Self::Language(lt) => lt.region(),
         }
     }
 }
 
-/// The languages a user last chose, as two-letter codes. Looked up per play
-/// rather than per file, so the choice follows the user across releases and
-/// titles.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// The languages a user last chose. Uses `LanguageTag` to preserve regional
+/// variants (e.g., "pt-BR" vs "pt-PT"). Looked up per play rather than per file,
+/// so the choice follows the user across releases and titles.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RememberedLanguages {
-    pub audio: Option<String>,
+    /// The audio language tag (e.g., "pt-BR", "pt", "eng")
+    pub audio: Option<LanguageTag>,
     pub subtitle: Option<RememberedSubtitle>,
     /// The media source the remembered track *indexes* were saved on. An
     /// index only means something in that file: another release of the same
@@ -2831,37 +2850,170 @@ pub struct RememberedLanguages {
     pub indexes_source: Option<Uuid>,
 }
 
-/// Normalize a language tag (two-letter code, three-letter ISO 639-3 code, or
-/// full name) to its two-letter ISO 639-1 form. Returns `None` when the tag
-/// cannot be mapped or is empty.
-pub fn lang_to_two_letter(lang: &str) -> Option<String> {
-    use std::str::FromStr;
-    let lang = lang
-        .trim()
-        .to_lowercase();
-    if lang.is_empty() {
-        return None;
+/// A language tag with its normalized two-letter ISO 639-1 code and optional region.
+///
+/// Supports regional variants like `pt-BR`, `pt-PT`, `zh-CN`, `zh-TW`, `en-US`, `en-GB`.
+/// The `code` field is the two-letter ISO 639-1 language code (e.g., `pt`, `zh`, `en`).
+/// The `region` field is the optional ISO 3166-1 alpha-2 region code (e.g., `BR`, `PT`, `CN`, `TW`, `US`, `GB`).
+/// The `original` field preserves the input tag for display purposes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LanguageTag {
+    /// The original language tag as provided (e.g., "pt-BR", "eng", "Portuguese")
+    pub original: String,
+    /// The normalized two-letter ISO 639-1 code (e.g., "pt", "en", "zh")
+    pub code: String,
+    /// The optional region code (e.g., "BR", "PT", "CN", "TW", "US", "GB")
+    pub region: Option<String>,
+}
+
+impl From<&str> for LanguageTag {
+    fn from(s: &str) -> Self {
+        LanguageTag::parse(s).unwrap_or_else(|| Self {
+            original: s.to_string(),
+            code: s.to_lowercase(),
+            region: None,
+        })
     }
-    if lang.len() == 2 {
-        return Some(lang);
+}
+
+impl From<String> for LanguageTag {
+    fn from(s: String) -> Self {
+        LanguageTag::parse(&s).unwrap_or_else(|| Self {
+            original: s.clone(),
+            code: s.to_lowercase(),
+            region: None,
+        })
     }
-    if let Some(language) = rust_iso639::from_code_2b(&lang) {
-        if !language
-            .code
-            .is_empty()
-        {
-            return Some(
-                language
+}
+
+impl LanguageTag {
+    /// Parse a language tag and normalize it to ISO 639-1 + optional region.
+    ///
+    /// Examples:
+    /// - `pt-BR` → `LanguageTag { original: "pt-BR", code: "pt", region: Some("BR") }`
+    /// - `pt_PT` → `LanguageTag { original: "pt_PT", code: "pt", region: Some("PT") }`
+    /// - `zh-CN` → `LanguageTag { original: "zh-CN", code: "zh", region: Some("CN") }`
+    /// - `zh_Hans_CN` → `LanguageTag { original: "zh_Hans_CN", code: "zh", region: Some("CN") }`
+    /// - `eng` → `LanguageTag { original: "eng", code: "en", region: None }`
+    /// - `pt` → `LanguageTag { original: "pt", code: "pt", region: None }`
+    /// - `Portuguese` → `LanguageTag { original: "Portuguese", code: "pt", region: None }`
+    pub fn parse(lang: &str) -> Option<Self> {
+        let lang = lang.trim();
+        if lang.is_empty() {
+            return None;
+        }
+
+        let original = lang.to_string();
+        let lang_lower = lang.to_lowercase();
+
+        // Handle regional variants: xx-YY, xx_YY, xx-YY-ZZ (e.g., zh-Hans-CN)
+        // Split by dash or underscore
+        let parts: Vec<&str> = lang_lower
+            .split(|c| c == '-' || c == '_')
+            .collect();
+
+        let (code, region) = if parts.len() >= 2 {
+            // First part is the language, last part might be region
+            let lang_code = parts[0];
+            let maybe_region = parts[parts.len() - 1];
+
+            // Check if last part looks like a region code (2 uppercase letters in original)
+            let region = if maybe_region.len() == 2
+                && maybe_region
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase())
+            {
+                Some(maybe_region.to_uppercase())
+            } else if maybe_region.len() == 2
+                && maybe_region
+                    .chars()
+                    .all(|c| c.is_ascii_alphabetic())
+            {
+                Some(maybe_region.to_uppercase())
+            } else {
+                None
+            };
+
+            // Normalize the language code
+            let normalized_code = Self::normalize_language_code(lang_code);
+            (normalized_code, region)
+        } else {
+            // No region separator, just normalize the language
+            let normalized_code = Self::normalize_language_code(&lang_lower);
+            (normalized_code, None)
+        };
+
+        Some(Self {
+            original,
+            code,
+            region,
+        })
+    }
+
+    fn normalize_language_code(code: &str) -> String {
+        use std::str::FromStr;
+
+        // Already a 2-letter code
+        if code.len() == 2 {
+            return code.to_lowercase();
+        }
+
+        // Try ISO 639-2B
+        if let Some(language) = rust_iso639::from_code_2b(code) {
+            if !language
+                .code
+                .is_empty()
+            {
+                return language
                     .code
-                    .to_string(),
-            );
+                    .to_lowercase();
+            }
+        }
+
+        // Try isolang for 3-letter codes and names
+        isolang::Language::from_639_3(code)
+            .or_else(|| isolang::Language::from_str(code).ok())
+            .or_else(|| isolang::Language::from_name_lowercase(code))
+            .and_then(|l| l.to_639_1())
+            .map(|s| s.to_lowercase())
+            .unwrap_or_else(|| code.to_lowercase())
+    }
+
+    /// Returns the full tag for API calls that support regional variants (e.g., TMDB "pt-BR").
+    /// Falls back to just the language code if no region.
+    pub fn for_api(&self) -> String {
+        match &self.region {
+            Some(r) => format!("{}-{}", self.code, r),
+            None => self
+                .code
+                .clone(),
         }
     }
-    isolang::Language::from_639_3(&lang)
-        .or_else(|| isolang::Language::from_str(&lang).ok())
-        .or_else(|| isolang::Language::from_name_lowercase(&lang))
-        .and_then(|l| l.to_639_1())
-        .map(|s| s.to_string())
+
+    /// Returns the two-letter code for matching/comparison.
+    pub fn code(&self) -> &str {
+        &self.code
+    }
+
+    /// Returns the region if present.
+    pub fn region(&self) -> Option<&str> {
+        self.region
+            .as_deref()
+    }
+
+    /// Returns the original tag for display.
+    pub fn display(&self) -> &str {
+        &self.original
+    }
+}
+
+/// Normalize a language tag to its two-letter ISO 639-1 code.
+/// Returns `None` when the tag cannot be mapped or is empty.
+///
+/// This is the legacy function kept for backward compatibility.
+/// Prefer `LanguageTag::parse()` for new code as it preserves region info.
+pub fn lang_to_two_letter(lang: &str) -> Option<String> {
+    LanguageTag::parse(lang).map(|lt| lt.code)
 }
 
 /// A language preference counts as "set" only when it holds a non-empty value.
@@ -3045,8 +3197,8 @@ impl MediaSourceInfo {
         if !client_wants_audio && user.remember_audio_selections {
             if let Some(stream) = languages
                 .audio
-                .as_deref()
-                .and_then(|lang| self.audio_stream_for_language(lang))
+                .as_ref()
+                .and_then(|lt| self.audio_stream_for_language(lt.code()))
             {
                 self.default_audio_stream_index = Some(stream.index);
                 audio_decided = true;
@@ -3060,7 +3212,7 @@ impl MediaSourceInfo {
                     subtitles_remembered_off = true;
                 }
                 Some(RememberedSubtitle::Language(lang)) => {
-                    if let Some(stream) = self.best_subtitle_for_language(lang) {
+                    if let Some(stream) = self.best_subtitle_for_language(lang.code()) {
                         self.default_subtitle_stream_index = Some(stream.index);
                         subtitle_decided = true;
                     }
@@ -8695,6 +8847,66 @@ mod tests {
     }
 
     #[test]
+    fn language_tag_parses_regional_variants() {
+        // pt-BR variants
+        let lt = LanguageTag::parse("pt-BR").unwrap();
+        assert_eq!(lt.code(), "pt");
+        assert_eq!(lt.region(), Some("BR"));
+        assert_eq!(lt.for_api(), "pt-BR");
+
+        let lt = LanguageTag::parse("pt_BR").unwrap();
+        assert_eq!(lt.code(), "pt");
+        assert_eq!(lt.region(), Some("BR"));
+        assert_eq!(lt.for_api(), "pt-BR");
+
+        // pt-PT
+        let lt = LanguageTag::parse("pt-PT").unwrap();
+        assert_eq!(lt.code(), "pt");
+        assert_eq!(lt.region(), Some("PT"));
+        assert_eq!(lt.for_api(), "pt-PT");
+
+        // zh-CN / zh-TW
+        let lt = LanguageTag::parse("zh-CN").unwrap();
+        assert_eq!(lt.code(), "zh");
+        assert_eq!(lt.region(), Some("CN"));
+        assert_eq!(lt.for_api(), "zh-CN");
+
+        let lt = LanguageTag::parse("zh-TW").unwrap();
+        assert_eq!(lt.code(), "zh");
+        assert_eq!(lt.region(), Some("TW"));
+        assert_eq!(lt.for_api(), "zh-TW");
+
+        // en-US / en-GB
+        let lt = LanguageTag::parse("en-US").unwrap();
+        assert_eq!(lt.code(), "en");
+        assert_eq!(lt.region(), Some("US"));
+        assert_eq!(lt.for_api(), "en-US");
+
+        // Legacy codes without region
+        let lt = LanguageTag::parse("pt").unwrap();
+        assert_eq!(lt.code(), "pt");
+        assert_eq!(lt.region(), None);
+        assert_eq!(lt.for_api(), "pt");
+
+        let lt = LanguageTag::parse("eng").unwrap();
+        assert_eq!(lt.code(), "en");
+        assert_eq!(lt.region(), None);
+        assert_eq!(lt.for_api(), "en");
+
+        // Full names
+        let lt = LanguageTag::parse("Portuguese").unwrap();
+        assert_eq!(lt.code(), "pt");
+        assert_eq!(lt.region(), None);
+        assert_eq!(lt.for_api(), "pt");
+
+        // zh-Hans-CN (script + region)
+        let lt = LanguageTag::parse("zh-Hans-CN").unwrap();
+        assert_eq!(lt.code(), "zh");
+        assert_eq!(lt.region(), Some("CN"));
+        assert_eq!(lt.for_api(), "zh-CN");
+    }
+
+    #[test]
     fn next_up_cutoff_accepts_rfc3339() {
         assert_eq!(
             normalize_next_up_date_cutoff("2026-06-17T23:00:00Z").unwrap(),
@@ -9193,7 +9405,7 @@ mod tests {
         subtitle: Option<RememberedSubtitle>,
     ) -> RememberedLanguages {
         RememberedLanguages {
-            audio: audio.map(str::to_string),
+            audio: audio.and_then(LanguageTag::parse),
             subtitle,
             ..Default::default()
         }
@@ -9299,7 +9511,12 @@ mod tests {
             &mut src,
             &cfg,
             None,
-            &languages(Some("fr"), Some(RememberedSubtitle::Language("fr".into()))),
+            &languages(
+                Some("fr"),
+                Some(RememberedSubtitle::Language(
+                    LanguageTag::parse("fr").unwrap(),
+                )),
+            ),
         );
         assert_eq!(src.default_audio_stream_index, None);
         assert_eq!(src.default_subtitle_stream_index, None);
@@ -9381,10 +9598,10 @@ mod tests {
             RememberedSubtitle::parse("off"),
             Some(RememberedSubtitle::Off)
         );
-        assert_eq!(
-            RememberedSubtitle::parse("fra"),
-            Some(RememberedSubtitle::Language("fr".into()))
-        );
+        // "fra" normalizes to code "fr" but preserves original "fra" for display
+        let parsed = RememberedSubtitle::parse("fra").unwrap();
+        assert_eq!(parsed.code(), Some("fr"));
+        assert_eq!(parsed.as_stored(), "fra"); // original preserved
         assert_eq!(RememberedSubtitle::parse(""), None);
         for stored in ["off", "fr"] {
             assert_eq!(

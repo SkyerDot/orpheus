@@ -1364,7 +1364,7 @@ impl StreamService {
                 api::MediaStreamType::Subtitle,
             )
             .await
-            .map(remux_sdks::remux::RememberedSubtitle::Language),
+            .map(|s| remux_sdks::remux::RememberedSubtitle::Language(s.into())),
             None => None,
         };
         let Ok(Some(media)) = db::Media::get_by_id(&ctx.db, &item_id).await else {
@@ -1374,7 +1374,7 @@ impl StreamService {
             &ctx.db,
             user,
             &media,
-            audio_lang.as_deref(),
+            audio_lang.as_ref().map(|lt| lt.code()),
             subtitle_choice.as_ref(),
         )
         .await
@@ -1413,8 +1413,8 @@ impl StreamService {
             );
     }
 
-    /// Two-letter language of track `index` in what `play_session_id` was
-    /// told, if it has one.
+    /// Language tag of track `index` in what `play_session_id` was
+    /// told, if it has one. Returns a `LanguageTag` preserving regional variants.
     async fn track_language(
         ctx: &AppContext,
         play_session_id: &str,
@@ -1422,7 +1422,7 @@ impl StreamService {
         media_source_id: Option<&str>,
         index: i32,
         kind: api::MediaStreamType,
-    ) -> Option<String> {
+    ) -> Option<remux_sdks::remux::LanguageTag> {
         let index = i64::from(index);
         if let Some(tracks) = ctx
             .store
@@ -1435,7 +1435,7 @@ impl StreamService {
                 .find(|t| t.index == index && t.kind == kind)?
                 .language
                 .as_deref()
-                .and_then(remux_sdks::remux::lang_to_two_letter);
+                .and_then(remux_sdks::remux::LanguageTag::parse);
         }
         // No PlaybackInfo answered this session (a client that skipped it):
         // the probed release is the best there is.
@@ -1450,7 +1450,7 @@ impl StreamService {
             .into_iter()
             .find(|s| s.type_ == Some(kind.clone()) && s.index == index)?
             .language?;
-        remux_sdks::remux::lang_to_two_letter(&language)
+        remux_sdks::remux::LanguageTag::parse(&language)
     }
 
     /// The release (stream) `play_session_id` plays for `item_id`: the one its

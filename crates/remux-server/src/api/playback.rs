@@ -3913,7 +3913,8 @@ mod tests {
             remembered()
                 .await
                 .audio
-                .as_deref(),
+                .as_ref()
+                .map(|lt| lt.code()),
             Some("fr")
         );
 
