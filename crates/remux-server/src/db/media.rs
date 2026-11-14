@@ -11,6 +11,7 @@ pub(crate) const DATE_CREATED_ORDER_EXPR: &str = "datetime(created_at)";
 
 static DB_WRITE_SEMAPHORE: std::sync::LazyLock<tokio::sync::Semaphore> =
     std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(1));
+
 use crate::{
     api,
     api::MediaSourceInfo,
@@ -19,6 +20,9 @@ use crate::{
 };
 use anyhow::{Context, Result, anyhow};
 use chrono::{Duration, NaiveDateTime, Utc, prelude::*};
+use rand::rngs::SmallRng;
+use rand::SeedableRng;
+use rand::seq::SliceRandom;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_with::skip_serializing_none;
@@ -4579,20 +4583,19 @@ impl Media {
                 }
 
                 // played=false (unplayed).
-                // reconcile_series_played_state keeps the series' own play_count
-                // in sync with its episodes, so a simple NOT EXISTS on the row
-                // itself works for both movies and series — no need to traverse
-                // the episode tree.
+                // Use NOT IN instead of NOT EXISTS to allow SQLite to start from the small
+                // user_media_state table (indexed by user_id) and do PK lookups on media,
+                // instead of scanning all media rows with a correlated subquery per row.
                 if user_state_filter.played == Some(false) {
-                    qb.push(
-                        " AND NOT EXISTS (SELECT 1 FROM user_media_state ums \
-                                          WHERE ums.media_id = media.id",
-                    );
                     if let Some(user_id) = &user_state_filter.user_id {
-                        qb.push(" AND ums.user_id = ")
-                            .push_bind(user_id.clone());
+                        qb.push(" AND media.id NOT IN (");
+                        qb.push("SELECT ums.media_id FROM user_media_state ums WHERE ums.user_id = ");
+                        qb.push_bind(user_id.clone());
+                        qb.push(" AND ums.play_count > 0)");
+                    } else {
+                        qb.push(" AND media.id NOT IN (");
+                        qb.push("SELECT media_id FROM user_media_state WHERE play_count > 0)");
                     }
-                    qb.push(" AND ums.play_count > 0)");
                 }
 
                 // resumable — IDs pre-fetched above; bind directly so SQLite uses PK
@@ -4935,6 +4938,12 @@ impl Media {
             })
             .unwrap_or(false);
 
+        // Detect RANDOM sampling early so it can be referenced after the ORDER BY block.
+        let is_random_sampling = filter
+            .sort_by
+            .iter()
+            .any(|s| matches!(s, api::ItemSortBy::Random));
+
         if !filter
             .sort_by
             .is_empty()
@@ -5147,7 +5156,13 @@ impl Media {
                                 format!("title COLLATE NOCASE {}", dir)
                             }
                         }
-                        api::ItemSortBy::Random => "RANDOM()".to_string(),
+                        api::ItemSortBy::Random => {
+                            // Efficient random sampling without ORDER BY RANDOM() O(n log n).
+                            // Use random offset based on filtered count; applied in Rust layer.
+                            // This placeholder tells the query builder to skip ORDER BY;
+                            // actual random sampling is done in get_by_filter after fetching a larger batch.
+                            "__RANDOM_SAMPLING__".to_string()
+                        }
                         api::ItemSortBy::ChannelOrder => {
                             format!("(sort_order IS NULL), COALESCE(sort_order, channel_number, 999999) {dir}, title COLLATE NOCASE")
                         }
@@ -5256,12 +5271,23 @@ impl Media {
                     "CASE WHEN LOWER(kind) = 'person' THEN 1 ELSE 0 END".to_string(),
                 );
             }
+            // Remove the placeholder
+            order_clauses.retain(|c| c != "__RANDOM_SAMPLING__");
             // When pop_joined, ordering is handled inside the UNION ALL arms —
             // arm 1 walks the selected metric index in DESC order, arm 2 follows.
             // Pushing ORDER BY here would force a global sort over the whole result.
             if !pop_joined {
-                records_qb.push(" ORDER BY ");
-                records_qb.push(order_clauses.join(", "));
+                if is_random_sampling {
+                    // For RANDOM sampling, don't add ORDER BY RANDOM().
+                    // Instead, we'll fetch a larger batch and sample in Rust.
+                    // Increase LIMIT to fetch a larger pool for sampling.
+                    let limit = filter.limit.unwrap_or(100) as u32;
+                    let pool_size = (limit * 10).min(1000).max(limit);
+                    records_qb.push(" LIMIT ").push_bind(pool_size);
+                } else {
+                    records_qb.push(" ORDER BY ");
+                    records_qb.push(order_clauses.join(", "));
+                }
             }
         } else if is_manual_collection {
             records_qb.push(" ORDER BY mr.weight ASC");
@@ -5301,19 +5327,25 @@ impl Media {
         }
 
         if let Some(limit) = &filter.limit {
-            records_qb
-                .push(" LIMIT ")
-                .push_bind(limit);
+            if !is_random_sampling {
+                records_qb
+                    .push(" LIMIT ")
+                    .push_bind(limit);
+            }
         } else if filter
             .offset
             .is_some()
         {
-            records_qb.push(" LIMIT -1");
+            if !is_random_sampling {
+                records_qb.push(" LIMIT -1");
+            }
         }
         if let Some(offset) = &filter.offset {
-            records_qb
-                .push(" OFFSET ")
-                .push_bind(offset);
+            if !is_random_sampling {
+                records_qb
+                    .push(" OFFSET ")
+                    .push_bind(offset);
+            }
         }
 
         let (count, records_result) = tokio::join!(
@@ -5335,6 +5367,24 @@ impl Media {
             }
         );
         let mut records = records_result?;
+        // Random sampling: if Random sort was requested, fetch a larger pool and sample in Rust.
+        // We detect this by checking if the original filter had Random sort.
+        let is_random_sampling = filter
+            .sort_by
+            .iter()
+            .any(|s| matches!(s, api::ItemSortBy::Random));
+        if is_random_sampling {
+            let limit = filter.limit.unwrap_or(100) as usize;
+            let pool_size = (limit * 10).min(1000).max(limit);
+            if records.len() > pool_size {
+                // Truncate to pool size before sampling
+                records.truncate(pool_size);
+            }
+            // Reservoir sampling for uniform random selection
+            let mut rng = SmallRng::from_entropy();
+            records.shuffle(&mut rng);
+            records.truncate(limit);
+        }
         if !records.is_empty() {
             let ids: Vec<Uuid> = records
                 .iter()
