@@ -11,8 +11,10 @@ pub enum Route {
     #[layout(DashboardLayout)]
     #[route("/")]
     DashboardRoute,
+    #[route("/sources")]
+    SourcesRoute,
     #[route("/addons")]
-    AddonsRoute,
+    AddonsRouteLegacy,
     #[route("/content/library")]
     LibraryRoute,
     #[route("/content/iptv")]
@@ -61,9 +63,15 @@ pub(crate) fn DashboardRoute() -> Element {
 }
 
 #[component]
-pub(crate) fn AddonsRoute() -> Element {
+pub(crate) fn SourcesRoute() -> Element {
     let app_state = use_context::<AppState>();
-    rsx! { AddonsPage { app_state } }
+    rsx! { SourcesPage { app_state } }
+}
+
+#[component]
+pub(crate) fn AddonsRouteLegacy() -> Element {
+    navigator().replace(Route::SourcesRoute);
+    rsx! {}
 }
 
 #[component]

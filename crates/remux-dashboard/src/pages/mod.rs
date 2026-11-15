@@ -1,4 +1,3 @@
-pub mod addons;
 pub mod api_keys;
 pub mod branding;
 pub mod collections;
@@ -7,6 +6,7 @@ pub mod devices;
 pub mod iptv;
 pub mod logs;
 pub mod settings;
+pub mod sources;
 pub mod streaming;
 pub mod streams;
 pub mod users;
@@ -33,7 +33,6 @@ fn stream_sorting_description(mode: SortMediaSourcesMode) -> &'static str {
     }
 }
 
-pub use addons::AddonsPage;
 pub use api_keys::ApiKeysPage;
 pub use branding::BrandingPage;
 pub use collections::CollectionsPage;
@@ -45,6 +44,7 @@ pub use settings::{
     IntroSettingsCard, JellyfinImportCard, PlaybackSettingsCard, RemuxdbSettingsCard,
     SearchSettingsCard, ServerSettingsCard,
 };
+pub use sources::SourcesPage;
 pub use streaming::StreamingGeneralSettingsPage;
 pub use streams::StreamGroupsCard;
 pub use users::UsersPage;

@@ -98,7 +98,8 @@ pub fn DashboardLayout() -> Element {
 
     let page_title = match route {
         Route::DashboardRoute => "Remux",
-        Route::AddonsRoute => "Addons",
+        Route::SourcesRoute => "Sources",
+        Route::AddonsRouteLegacy => "Sources",
         Route::LibraryRoute => "Library",
         Route::IptvRoute => "IPTV",
         Route::StreamingGeneralRoute => "Streaming General",
@@ -143,9 +144,9 @@ pub fn DashboardLayout() -> Element {
                         on_click: move |_| { navigator().push(Route::DashboardRoute); sidebar_open.set(false); },
                     }
                     NavItem {
-                        label: "Addons",
-                        active: route == Route::AddonsRoute,
-                        on_click: move |_| { navigator().push(Route::AddonsRoute); sidebar_open.set(false); },
+                        label: "Sources",
+                        active: route == Route::SourcesRoute,
+                        on_click: move |_| { navigator().push(Route::SourcesRoute); sidebar_open.set(false); },
                     }
                     NavItem {
                         label: "Tasks",
