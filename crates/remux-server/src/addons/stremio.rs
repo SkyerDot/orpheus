@@ -386,12 +386,7 @@ impl CatalogAddon for StremioAddon {
                 page_concurrency,
             )
             .await?;
-        let tmdb_client = crate::common::tmdb_client(
-            &ctx.db,
-            &ctx.config
-                .tmdb_base_url,
-        )
-        .await;
+        let tmdb_client = crate::common::tmdb_client(ctx).await;
 
         let stream = stream
             .map(move |mut meta| {

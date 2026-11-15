@@ -45,17 +45,7 @@ pub async fn remote_search_movie(
     let info = query
         .search_info
         .unwrap_or_default();
-    let Some(client) = common::tmdb_client(
-        &state
-            .ctx
-            .db,
-        &state
-            .ctx
-            .config
-            .tmdb_base_url,
-    )
-    .await
-    else {
+    let Some(client) = common::tmdb_client(&state.ctx).await else {
         return Ok(Json(Vec::<api::RemoteSearchResult>::new()).into_response());
     };
     let name = info
@@ -110,17 +100,7 @@ pub async fn remote_search_series(
     let info = query
         .search_info
         .unwrap_or_default();
-    let Some(client) = common::tmdb_client(
-        &state
-            .ctx
-            .db,
-        &state
-            .ctx
-            .config
-            .tmdb_base_url,
-    )
-    .await
-    else {
+    let Some(client) = common::tmdb_client(&state.ctx).await else {
         return Ok(Json(Vec::<api::RemoteSearchResult>::new()).into_response());
     };
     let name = info

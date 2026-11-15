@@ -86,15 +86,9 @@ fn movie_ids_endpoint(tmdb_id: i64) -> sdks::tmdb::MovieEndpoint {
 pub struct MediaResolveService;
 
 impl MediaResolveService {
-    /// `None` only when `tmdb_base_url` will not parse; a missing key falls back
-    /// to the bundled one. Reads the settings row, so callers pass it down.
+    /// Returns `None` when no TMDB addon instance is loaded.
     async fn tmdb(ctx: &AppContext) -> Option<RestClient<BearerAuth>> {
-        crate::common::tmdb_client(
-            &ctx.db,
-            &ctx.config
-                .tmdb_base_url,
-        )
-        .await
+        crate::common::tmdb_client(ctx).await
     }
 
     async fn resolve_media_imdb(media: &mut db::Media, ctx: &AppContext) -> bool {

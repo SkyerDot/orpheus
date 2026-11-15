@@ -394,19 +394,9 @@ pub async fn get_watch_providers(
     State(state): State<AppState>,
     _session: auth::AdminSession,
 ) -> Result<Json<Vec<crate::services::stream_provider::StreamProvider>>> {
-    let tmdb_base = state
-        .ctx
-        .config
-        .tmdb_base_url
-        .clone();
-    let client = tmdb_client(
-        &state
-            .ctx
-            .db,
-        &tmdb_base,
-    )
-    .await
-    .ok_or_else(|| anyhow::anyhow!("TMDB client is unavailable"))?;
+    let Some(client) = tmdb_client(&state.ctx).await else {
+        return Ok(Json(Vec::new()));
+    };
 
     let providers = client
         .execute(

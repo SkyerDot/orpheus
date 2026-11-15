@@ -1733,6 +1733,24 @@ impl AddonService {
             .load()
     }
 
+    /// Whether at least one loaded addon instance is the given preset kind.
+    ///
+    /// `load_runtimes` already drops rows whose `enabled` is false, so the loaded
+    /// list is the single truth for "is this source on": no SQL, no cache, no
+    /// invalidation. A second instance of the same preset keeps the source on
+    /// (the enable flag is per row, the source is per kind).
+    pub fn has_enabled_preset(&self, preset_id: &str) -> bool {
+        self.list()
+            .iter()
+            .any(|runtime| {
+                runtime
+                    .row
+                    .preset
+                    .kind
+                    == preset_id
+            })
+    }
+
     pub fn get(&self, id: Uuid) -> Option<AddonRuntime> {
         self.inner
             .load()

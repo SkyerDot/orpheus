@@ -631,12 +631,7 @@ impl IndexAddon for OpendalAddon {
         addon: &Addon,
         progress: ProgressReporter,
     ) -> Result<()> {
-        let tmdb = common::tmdb_client(
-            &ctx.db,
-            &ctx.config
-                .tmdb_base_url,
-        )
-        .await;
+        let tmdb = common::tmdb_client(ctx).await;
         scan_addon(ctx, &tmdb, addon).await?;
         progress.set(100.0);
         Ok(())

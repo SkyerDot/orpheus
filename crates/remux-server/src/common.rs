@@ -163,33 +163,23 @@ pub fn stable_media_uuid(kind: &crate::db::MediaKind, canonical: &str) -> Uuid {
 }
 
 /// TMDB client for direct (non-addon) lookups: artwork enrichment, subtitles,
-/// remux search. Returns `None` when a TMDB addon is installed but disabled, so
+/// remux search. Returns `None` while no TMDB addon instance is loaded, so
 /// turning the metadata source off in the admin panel also stops these paths.
 pub async fn tmdb_client(
-    db: &sqlx::SqlitePool,
-    base_url: &str,
+    ctx: &crate::AppContext,
 ) -> Option<sdks::RestClient<sdks::BearerAuth>> {
-    if !tmdb_source_enabled(db).await {
+    if !ctx
+        .addons
+        .has_enabled_preset(crate::addons::tmdb::PRESET_ID)
+    {
         return None;
     }
-    let cfg = crate::db::Settings::get_config_or_default(db).await;
-    tmdb_client_from_config(&cfg, base_url)
-}
-
-/// No TMDB addon row at all means "not installed": enrichment keeps working
-/// with the API key from settings, as before. Once installed, a single enabled
-/// TMDB row keeps the source on.
-async fn tmdb_source_enabled(db: &sqlx::SqlitePool) -> bool {
-    let rows: Vec<bool> = sqlx::query_scalar(
-        "SELECT enabled FROM addons WHERE json_extract(preset, '$.kind') = 'tmdb'",
+    let cfg = crate::db::Settings::get_config_or_default(&ctx.db).await;
+    tmdb_client_from_config(
+        &cfg,
+        &ctx.config
+            .tmdb_base_url,
     )
-    .fetch_all(db)
-    .await
-    .unwrap_or_default();
-    rows.is_empty()
-        || rows
-            .iter()
-            .any(|enabled| *enabled)
 }
 
 pub fn tmdb_client_from_config(
@@ -362,8 +352,6 @@ impl HideConsole for tokio::process::Command {
         self
     }
 }
-
-#[cfg(test)]
 mod progress_tests {
     use super::*;
 
@@ -409,112 +397,6 @@ mod progress_tests {
             (read(&atomic) - 33.3).abs() < 0.2,
             "expected ~33.3%, got {}",
             read(&atomic)
-        );
-    }
-}
-
-#[cfg(test)]
-mod tmdb_source_tests {
-    use super::*;
-
-    async fn set_tmdb_enabled(db: &sqlx::SqlitePool, enabled: bool) {
-        sqlx::query(
-            "UPDATE addons SET enabled = ? WHERE json_extract(preset, '$.kind') = 'tmdb'",
-        )
-        .bind(enabled)
-        .execute(db)
-        .await
-        .unwrap();
-    }
-
-    #[tokio::test]
-    async fn an_uninstalled_source_keeps_enrichment_on() {
-        let (_server, guard) = crate::integration_test::new_test_server()
-            .await
-            .unwrap();
-        sqlx::query("DELETE FROM addons WHERE json_extract(preset, '$.kind') = 'tmdb'")
-            .execute(
-                &guard
-                    .0
-                    .db,
-            )
-            .await
-            .unwrap();
-        assert!(
-            tmdb_source_enabled(
-                &guard
-                    .0
-                    .db
-            )
-            .await
-        );
-        assert!(
-            tmdb_client(
-                &guard
-                    .0
-                    .db,
-                "https://api.themoviedb.org/3"
-            )
-            .await
-            .is_some()
-        );
-    }
-
-    #[tokio::test]
-    async fn a_disabled_addon_turns_direct_tmdb_lookups_off() {
-        let (_server, guard) = crate::integration_test::new_test_server()
-            .await
-            .unwrap();
-        // TMDB is seeded enabled by the default-addons migration.
-        assert!(
-            tmdb_source_enabled(
-                &guard
-                    .0
-                    .db
-            )
-            .await
-        );
-
-        set_tmdb_enabled(
-            &guard
-                .0
-                .db,
-            false,
-        )
-        .await;
-        assert!(
-            !tmdb_source_enabled(
-                &guard
-                    .0
-                    .db
-            )
-            .await
-        );
-        assert!(
-            tmdb_client(
-                &guard
-                    .0
-                    .db,
-                "https://api.themoviedb.org/3"
-            )
-            .await
-            .is_none()
-        );
-
-        set_tmdb_enabled(
-            &guard
-                .0
-                .db,
-            true,
-        )
-        .await;
-        assert!(
-            tmdb_source_enabled(
-                &guard
-                    .0
-                    .db
-            )
-            .await
         );
     }
 }

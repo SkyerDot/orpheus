@@ -16,11 +16,15 @@ use crate::{
     services::MediaResolveService,
 };
 
+/// Preset id of the TMDB addon; also identifies the metadata source when code
+/// needs to know whether it is enabled.
+pub const PRESET_ID: &str = "tmdb";
+
 pub struct TmdbPreset;
 
 impl AddonPreset for TmdbPreset {
     fn id(&self) -> &'static str {
-        "tmdb"
+        PRESET_ID
     }
 
     fn metadata(&self) -> AddonMetadata {
@@ -91,7 +95,7 @@ fn tmdb_image(path: Option<&str>, kind: db::ImageKind) -> Option<String> {
 #[async_trait]
 impl AddonKind for TmdbAddon {
     fn id(&self) -> &'static str {
-        "tmdb"
+        PRESET_ID
     }
 }
 

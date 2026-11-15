@@ -1232,4 +1232,147 @@ mod test {
             "listing addons must not issue manifest requests"
         );
     }
+
+    async fn tmdb_addon_id(db: &sqlx::SqlitePool) -> Uuid {
+        sqlx::query_scalar(
+            "SELECT id FROM addons WHERE json_extract(preset, '$.kind') = ?1",
+        )
+        .bind(crate::addons::tmdb::PRESET_ID)
+        .fetch_one(db)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn disabling_tmdb_stops_direct_lookups_until_it_is_enabled_again() {
+        let (server, ctx, token) = authenticated_server().await;
+        let (h, v) = auth(&token);
+        let id = tmdb_addon_id(
+            &ctx.0
+                .db,
+        )
+        .await;
+
+        assert!(
+            crate::common::tmdb_client(&ctx.0)
+                .await
+                .is_some()
+        );
+
+        server
+            .post(&format!("/addons/{id}"))
+            .add_header(h.clone(), v.clone())
+            .json(&json!({ "enabled": false }))
+            .await
+            .assert_status_ok();
+        assert!(
+            !ctx.0
+                .addons
+                .has_enabled_preset(crate::addons::tmdb::PRESET_ID)
+        );
+        assert!(
+            crate::common::tmdb_client(&ctx.0)
+                .await
+                .is_none()
+        );
+        server
+            .get("/remux/watch-providers")
+            .add_header(h.clone(), v.clone())
+            .await
+            .assert_status_ok();
+
+        server
+            .post(&format!("/addons/{id}"))
+            .add_header(h, v)
+            .json(&json!({ "enabled": true }))
+            .await
+            .assert_status_ok();
+        assert!(
+            crate::common::tmdb_client(&ctx.0)
+                .await
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn disabling_another_source_leaves_tmdb_on() {
+        let (server, ctx, token) = authenticated_server().await;
+        let (h, v) = auth(&token);
+        let deezer: Uuid = sqlx::query_scalar(
+            "SELECT id FROM addons WHERE json_extract(preset, '$.kind') = 'deezer'",
+        )
+        .fetch_one(
+            &ctx.0
+                .db,
+        )
+        .await
+        .unwrap();
+        server
+            .post(&format!("/addons/{deezer}"))
+            .add_header(h, v)
+            .json(&json!({ "enabled": false }))
+            .await
+            .assert_status_ok();
+        assert!(
+            crate::common::tmdb_client(&ctx.0)
+                .await
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_second_enabled_tmdb_instance_keeps_the_source_on() {
+        let (server, ctx, token) = authenticated_server().await;
+        let (h, v) = auth(&token);
+        let seeded = tmdb_addon_id(
+            &ctx.0
+                .db,
+        )
+        .await;
+
+        let second = crate::common::get_uuid();
+        sqlx::query(
+            "INSERT INTO addons (id, name, preset, resources, types, enabled, priority, created_at, updated_at) \
+             VALUES (?1, 'TMDB 2', '{\"kind\":\"tmdb\",\"config\":{}}', '[\"meta\"]', '[]', 1, 100, datetime('now'), datetime('now'))",
+        )
+        .bind(second)
+        .execute(&ctx.0.db)
+        .await
+        .unwrap();
+        ctx.0
+            .addons
+            .reload(
+                &ctx.0
+                    .db,
+                &ctx.0
+                    .config,
+            )
+            .await
+            .unwrap();
+
+        server
+            .post(&format!("/addons/{seeded}"))
+            .add_header(h.clone(), v.clone())
+            .json(&json!({ "enabled": false }))
+            .await
+            .assert_status_ok();
+        assert!(
+            crate::common::tmdb_client(&ctx.0)
+                .await
+                .is_some(),
+            "the second enabled instance keeps the source on"
+        );
+
+        server
+            .post(&format!("/addons/{second}"))
+            .add_header(h, v)
+            .json(&json!({ "enabled": false }))
+            .await
+            .assert_status_ok();
+        assert!(
+            crate::common::tmdb_client(&ctx.0)
+                .await
+                .is_none()
+        );
+    }
 }
