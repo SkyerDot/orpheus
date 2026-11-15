@@ -54,6 +54,8 @@ struct CatalogPlan {
     /// Every catalog collection the in-scope addons own, enabled or not. Stale
     /// cleanup only touches collections inside this set.
     domain_collection_ids: HashSet<Uuid>,
+    /// Frozen (disabled) catalog collection IDs — excluded from stale cleanup.
+    protected_collection_ids: HashSet<Uuid>,
     total_items: usize,
 }
 
@@ -68,6 +70,7 @@ async fn plan_catalogs(ctx: &AppContext, scope: CatalogScope) -> CatalogPlan {
         .catalogs_for_kinds(ctx, LIBRARY_KINDS)
         .await;
     let mut domain_collection_ids: HashSet<Uuid> = HashSet::new();
+    let mut protected_collection_ids: HashSet<Uuid> = HashSet::new();
 
     // Flatten to (catalog, expected item count) up front so each catalog's
     // share of the progress range is weighted by how much work it's actually
@@ -90,6 +93,11 @@ async fn plan_catalogs(ctx: &AppContext, scope: CatalogScope) -> CatalogPlan {
             .id;
         for cat_info in available {
             domain_collection_ids.insert(cat_info.collection_id);
+            // Frozen catalogs (enabled=false) are protected from stale cleanup
+            // but still part of the domain.
+            if !cat_info.enabled {
+                protected_collection_ids.insert(cat_info.collection_id);
+            }
         }
         // Catalogs are only offered for global addons (the dashboard hides
         // the switches on user addons). An addon moved to the user tab
@@ -130,6 +138,7 @@ async fn plan_catalogs(ctx: &AppContext, scope: CatalogScope) -> CatalogPlan {
     CatalogPlan {
         work,
         domain_collection_ids,
+        protected_collection_ids,
         total_items,
     }
 }
@@ -214,12 +223,14 @@ async fn import_catalogs(
         &ctx.db,
         &valid_collection_ids,
         &plan.domain_collection_ids,
+        &plan.protected_collection_ids,
     )
     .await;
     remove_stale_catalog_memberships(
         &ctx.db,
         &valid_collection_ids,
         &plan.domain_collection_ids,
+        &plan.protected_collection_ids,
     )
     .await;
 

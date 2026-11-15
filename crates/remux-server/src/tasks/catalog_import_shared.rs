@@ -29,6 +29,16 @@ pub async fn import_catalog_items(
     progress: &ProgressReporter,
 ) -> Result<(HashMap<String, usize>, HashMap<String, usize>)> {
     let completeness = stream.completeness();
+    // Extract addon_id and local_catalog_id from media_id for updating last_refreshed_at.
+    // media_id format: "addon:{addon_uuid}:{local_catalog_id}"
+    let (addon_id, local_catalog_id) = catalog_membership(media_id)
+        .and_then(|(aid, cid)| {
+            Uuid::parse_str(aid)
+                .ok()
+                .map(|aid| (aid, cid.to_string()))
+        })
+        .unwrap_or((Uuid::nil(), String::new()));
+
     // Stop pulling from the underlying paginated stream once we have enough items.
     // Without this, the stream fetches ALL pages until empty even when max=50.
     //
@@ -365,8 +375,13 @@ pub async fn import_catalog_items(
         if collection_id != Uuid::nil() {
             let catalog_tags: Vec<String> =
                 if let Some((addon_uuid, local_cat_id)) = membership {
-                    ctx.addons
-                        .catalog_tags(addon_uuid, local_cat_id)
+                    match Uuid::parse_str(addon_uuid) {
+                        Ok(addon_id) => match db::get_catalog_state(&ctx.db, addon_id, local_cat_id).await {
+                            Ok(Some(row)) => row.to_state().map(|s| s.tags).unwrap_or_default(),
+                            _ => vec![],
+                        },
+                        Err(_) => vec![],
+                    }
                 } else {
                     vec![]
                 };
@@ -533,13 +548,28 @@ pub async fn import_catalog_items(
         }
     }
 
+    // Stamp last_refreshed_at for successfully imported catalogs (only when complete).
+    // Frozen catalogs (enabled=0) are never imported, so they never get here.
+    // Failed streams (incomplete) also don't update the timestamp.
+    if completeness.is_complete()
+        && addon_id != Uuid::nil()
+        && !local_catalog_id.is_empty()
+    {
+        if let Err(e) =
+            db::set_catalog_last_refreshed(&ctx.db, addon_id, &local_catalog_id).await
+        {
+            warn!(addon = %addon_id, catalog = %local_catalog_id, error = %e, "failed to update catalog last_refreshed_at");
+        }
+    }
+
     Ok((counts, new_counts))
 }
 
 /// Delete rows from `media_relations` (role='catalog') whose left_media_id is in
 /// `domain_collection_ids` (every catalog — enabled or disabled — belonging to the
 /// addons this caller is responsible for) but not in `valid_collection_ids` (the
-/// catalogs actually imported this run).
+/// catalogs actually imported this run), and not in `protected_collection_ids`
+/// (frozen catalogs whose memberships must be preserved).
 ///
 /// Scoping by `domain_collection_ids` is required because callers (e.g.
 /// `RefreshLibraryTask` and `RefreshIptvTask`) each only import a subset of catalog
@@ -548,10 +578,15 @@ pub async fn import_catalog_items(
 /// partial `valid_collection_ids` set. There's no FK/column linking a collection's
 /// synthetic id (`Uuid::new_v5(addon_id, local_catalog_id)`) back to its owning addon
 /// in the DB, so the scope has to be computed by the caller and passed in.
+///
+/// `protected_collection_ids` are catalogs with `addon_catalogs.enabled = 0` —
+/// frozen catalogs that keep their data but are excluded from the refresh work list.
+/// Their memberships must never be deleted by the stale cleanup.
 pub async fn remove_stale_catalog_memberships(
     db: &sqlx::SqlitePool,
     valid_collection_ids: &HashSet<Uuid>,
     domain_collection_ids: &HashSet<Uuid>,
+    protected_collection_ids: &HashSet<Uuid>,
 ) {
     let existing: Vec<Uuid> = match sqlx::query_scalar(
         "SELECT DISTINCT left_media_id FROM media_relations WHERE role = 'catalog'",
@@ -569,7 +604,9 @@ pub async fn remove_stale_catalog_memberships(
     let stale: Vec<&Uuid> = existing
         .iter()
         .filter(|id| {
-            domain_collection_ids.contains(*id) && !valid_collection_ids.contains(*id)
+            domain_collection_ids.contains(*id)
+                && !valid_collection_ids.contains(*id)
+                && !protected_collection_ids.contains(*id)
         })
         .collect();
 
@@ -594,14 +631,19 @@ pub async fn remove_stale_catalog_memberships(
 /// Delete `Playlist` media whose addon catalog left `valid_collection_ids`.
 /// Run BEFORE `remove_stale_catalog_memberships` — it needs the catalog
 /// membership row to locate the orphans.
+/// `protected_collection_ids` (frozen catalogs) are excluded from pruning.
 pub async fn prune_orphaned_playlists(
     db: &sqlx::SqlitePool,
     valid_collection_ids: &HashSet<Uuid>,
     domain_collection_ids: &HashSet<Uuid>,
+    protected_collection_ids: &HashSet<Uuid>,
 ) {
     let stale: Vec<Uuid> = domain_collection_ids
         .iter()
-        .filter(|id| !valid_collection_ids.contains(*id))
+        .filter(|id| {
+            !valid_collection_ids.contains(*id)
+                && !protected_collection_ids.contains(*id)
+        })
         .copied()
         .collect();
     if stale.is_empty() {

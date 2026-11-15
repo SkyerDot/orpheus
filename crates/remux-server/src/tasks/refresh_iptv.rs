@@ -55,6 +55,7 @@ impl Task for RefreshIptvTask {
             .max(1);
         let mut valid_collection_ids: HashSet<Uuid> = HashSet::new();
         let mut domain_collection_ids: HashSet<Uuid> = HashSet::new();
+        let mut protected_collection_ids: HashSet<Uuid> = HashSet::new();
         let import_start = Utc::now().naive_utc();
 
         // Channels are pruned by `updated_at`, so a catalog whose import
@@ -72,6 +73,9 @@ impl Task for RefreshIptvTask {
 
             for cat_info in available {
                 domain_collection_ids.insert(cat_info.collection_id);
+                if !cat_info.enabled {
+                    protected_collection_ids.insert(cat_info.collection_id);
+                }
             }
 
             let enabled: Vec<_> = available
@@ -150,6 +154,7 @@ impl Task for RefreshIptvTask {
             &ctx.db,
             &valid_collection_ids,
             &domain_collection_ids,
+            &protected_collection_ids,
         )
         .await;
         if all_catalogs_complete {
