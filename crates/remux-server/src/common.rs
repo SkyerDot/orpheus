@@ -352,6 +352,7 @@ impl HideConsole for tokio::process::Command {
         self
     }
 }
+#[cfg(test)]
 mod progress_tests {
     use super::*;
 
