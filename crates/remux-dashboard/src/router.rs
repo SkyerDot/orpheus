@@ -70,7 +70,11 @@ pub(crate) fn SourcesRoute() -> Element {
 
 #[component]
 pub(crate) fn AddonsRouteLegacy() -> Element {
-    navigator().replace(Route::SourcesRoute);
+    // Redirect /addons to /sources using Dioxus navigator
+    let nav = navigator();
+    use_effect(move || {
+        nav.replace(Route::SourcesRoute);
+    });
     rsx! {}
 }
 

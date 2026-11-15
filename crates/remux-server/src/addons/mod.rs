@@ -1958,34 +1958,6 @@ impl AddonService {
             })
     }
 
-    /// Return the tags configured for a specific catalog within an addon.
-    /// DEPRECATED: Use `db::get_catalog_state` directly for up-to-date tags from the
-    /// `addon_catalogs` table. This fallback reads from the legacy JSON config.
-    pub fn catalog_tags(&self, addon_uuid: &str, local_cat_id: &str) -> Vec<String> {
-        let Ok(id) = Uuid::parse_str(addon_uuid) else {
-            return vec![];
-        };
-        self.inner
-            .load()
-            .iter()
-            .find(|r| {
-                r.row
-                    .id
-                    == id
-            })
-            .map(|r| {
-                r.row
-                    .catalog_states()
-                    .get(local_cat_id)
-                    .map(|s| {
-                        s.tags
-                            .clone()
-                    })
-                    .unwrap_or_default()
-            })
-            .unwrap_or_default()
-    }
-
     pub fn make_catalog_stream(
         &self,
         media_id: &str,

@@ -7083,6 +7083,7 @@ name = "remux-dashboard"
 version = "0.0.0"
 dependencies = [
  "base64 0.22.1",
+ "chrono",
  "dioxus",
  "dioxus-icons",
  "dioxus-primitives",

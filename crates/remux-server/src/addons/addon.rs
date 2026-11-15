@@ -130,6 +130,8 @@ impl Addon {
         Ok(())
     }
 
+    /// Returns the catalog states from the legacy JSON config.
+    /// Now only used as the offline backfill source (see `db::backfill_catalog_states`).
     pub fn catalog_states(&self) -> HashMap<String, CatalogState> {
         self.preset
             .config
@@ -137,18 +139,6 @@ impl Addon {
             .get("catalogs")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default()
-    }
-
-    pub fn set_catalog_states(&mut self, states: HashMap<String, CatalogState>) {
-        let mut cfg = self
-            .preset
-            .config
-            .expose()
-            .clone();
-        cfg["catalogs"] = serde_json::to_value(states).unwrap_or_default();
-        self.preset
-            .config = cfg.into();
-        self.updated_at = Utc::now().naive_utc();
     }
 }
 

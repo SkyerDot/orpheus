@@ -25,7 +25,6 @@ pub mod webhook;
 pub use activity::*;
 pub use addon_catalog::*;
 pub use api_key::*;
-pub use auth::*;
 pub use image::*;
 pub use iptv::*;
 pub use media::*;

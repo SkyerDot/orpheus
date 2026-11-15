@@ -389,6 +389,8 @@ fn watch_provider_key(name: &str) -> String {
 }
 
 /// `GET /remux/watch-providers` — list all streaming providers available on TMDB.
+/// Returns an empty list when no TMDB addon is configured (no API key available).
+/// This is intentional: the endpoint gracefully degrades instead of failing loudly.
 #[get("/remux/watch-providers")]
 pub async fn get_watch_providers(
     State(state): State<AppState>,

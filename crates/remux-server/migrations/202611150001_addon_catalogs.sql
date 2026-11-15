@@ -17,5 +17,5 @@ CREATE TABLE IF NOT EXISTS addon_catalogs (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_addon_catalogs_collection_id ON addon_catalogs(collection_id);
 
 -- Backfill existing catalog states from addons.preset.config["catalogs"]
--- This runs once at startup via a Rust function (no network calls)
+-- This runs once at startup via `db::backfill_catalog_states` (no network calls)
 -- INSERT OR IGNORE preserves any admin values already in the table

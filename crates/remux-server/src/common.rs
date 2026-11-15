@@ -163,17 +163,11 @@ pub fn stable_media_uuid(kind: &crate::db::MediaKind, canonical: &str) -> Uuid {
 }
 
 /// TMDB client for direct (non-addon) lookups: artwork enrichment, subtitles,
-/// remux search. Returns `None` while no TMDB addon instance is loaded, so
-/// turning the metadata source off in the admin panel also stops these paths.
+/// remux search. TMDB is a system addon and cannot be disabled; the client is
+/// available whenever an API key is configured in Settings.
 pub async fn tmdb_client(
     ctx: &crate::AppContext,
 ) -> Option<sdks::RestClient<sdks::BearerAuth>> {
-    if !ctx
-        .addons
-        .has_enabled_preset(crate::addons::tmdb::PRESET_ID)
-    {
-        return None;
-    }
     let cfg = crate::db::Settings::get_config_or_default(&ctx.db).await;
     tmdb_client_from_config(
         &cfg,

@@ -4,7 +4,7 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use chrono::Utc;
+use chrono::{SecondsFormat, Utc};
 use tracing::warn;
 
 use remux_macros::{delete, get, post};
@@ -189,32 +189,16 @@ fn addon_to_dto(addon: Addon, addons: &AddonService) -> AddonDto {
 
 /// List metadata for every registered addon kind. Drives the dashboard's
 /// "add addon" picker and form renderer.
-/// Excludes system presets that are already installed (e.g. TMDB) to prevent duplicates.
+/// Includes installed system presets so their option forms (e.g. TMDB API key) remain accessible.
+/// The dashboard filters the "Add source" picker by "kind already present in addons" to prevent duplicates.
 #[get("/addon-kinds")]
 pub async fn list_addon_kinds(
     State(state): State<AppState>,
     _session: auth::AdminSession,
 ) -> Result<Json<Vec<AddonMetadata>>> {
-    let addons = Addon::list(
-        &state
-            .ctx
-            .db,
-    )
-    .await?;
-    let system_preset_kinds: std::collections::HashSet<String> = addons
-        .iter()
-        .filter(|a| a.system)
-        .map(|a| {
-            a.preset
-                .kind
-                .clone()
-        })
-        .collect();
-
     Ok(Json(
         registered_presets()
             .iter()
-            .filter(|p| !system_preset_kinds.contains(p.id()))
             .map(|p| p.metadata())
             .collect(),
     ))
@@ -717,10 +701,14 @@ pub async fn get_addon_catalogs(
                 tags: c.tags,
                 collection_id: Some(c.collection_id),
                 // Add last_refreshed_at under remux namespace per AGENTS.md
+                // Sent as ISO-8601 UTC (RFC3339) for consistent parsing.
                 remux: extra.map(|e| remux_sdks::remux::AddonCatalogRemux {
                     last_refreshed_at: e
                         .last_refreshed_at
-                        .map(|dt| dt.to_string()),
+                        .map(|dt| {
+                            dt.and_utc()
+                                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                        }),
                 }),
             }
         })
@@ -732,6 +720,7 @@ pub async fn get_addon_catalogs(
 /// Batch-update enabled/max_items/tags for an addon's catalogs.
 /// Partial update: only fields present in each request entry are changed.
 /// `enabled: false` alone must not clear `max_items` or `tags`.
+/// Sentinel: `max_items = 0` means "clear the cap" (store NULL/inherit).
 #[post("/addons/{id}/catalogs")]
 pub async fn update_addon_catalogs(
     State(state): State<AppState>,
@@ -778,6 +767,8 @@ pub async fn update_addon_catalogs(
         let enabled = req.enabled; // enabled is required in the request
         let max_items = req
             .max_items
+            .map(|v| if v == 0 { None } else { Some(v) })
+            .flatten()
             .or(current_max_items);
         let tags = req
             .tags
@@ -786,7 +777,7 @@ pub async fn update_addon_catalogs(
 
         let collection_id = Uuid::new_v5(&id, local_id.as_bytes());
 
-        // Upsert to addon_catalogs table
+        // Upsert to addon_catalogs table (last_refreshed_at preserved via COALESCE)
         addon_catalog::upsert_catalog_state(
             &state
                 .ctx
@@ -801,61 +792,30 @@ pub async fn update_addon_catalogs(
         )
         .await?;
 
-        // Apply tags immediately to all media already in this catalog.
-        // We need to sync tags: remove old provider tags not in new set, add new ones.
-        let old_provider_tags: std::collections::HashSet<String> = current_tags
-            .iter()
-            .filter(|t| t.starts_with("provider:"))
-            .cloned()
-            .collect();
+        // Apply new provider tags immediately to all media already in this catalog.
+        // Add-only behavior: never delete tags that may have been added by admin or other catalogs.
         let new_provider_tags: std::collections::HashSet<String> = tags
             .iter()
             .filter(|t| t.starts_with("provider:"))
             .cloned()
             .collect();
 
-        // Remove tags that are no longer in the catalog config
-        for tag in &old_provider_tags {
-            if !new_provider_tags.contains(tag) {
-                if let Err(e) = sqlx::query(
-                    "DELETE FROM media_tags WHERE tag = ? AND media_id IN (
-                         SELECT mr.right_media_id FROM media_relations mr
-                         WHERE mr.left_media_id = ? AND mr.role = 'catalog'
-                     )",
-                )
-                .bind(tag)
-                .bind(collection_id)
-                .execute(
-                    &state
-                        .ctx
-                        .db,
-                )
-                .await
-                {
-                    warn!(addon = %id, catalog = %local_id, tag = %tag, error = %e, "failed to remove catalog tag");
-                }
-            }
-        }
-
-        // Add new provider tags
         for tag in &new_provider_tags {
-            if !old_provider_tags.contains(tag) {
-                if let Err(e) = sqlx::query(
-                    "INSERT OR IGNORE INTO media_tags (media_id, tag) \
-                     SELECT mr.right_media_id, ? FROM media_relations mr \
-                     WHERE mr.left_media_id = ? AND mr.role = 'catalog'",
-                )
-                .bind(tag)
-                .bind(collection_id)
-                .execute(
-                    &state
-                        .ctx
-                        .db,
-                )
-                .await
-                {
-                    warn!(addon = %id, catalog = %local_id, tag = %tag, error = %e, "failed to apply catalog tag");
-                }
+            if let Err(e) = sqlx::query(
+                "INSERT OR IGNORE INTO media_tags (media_id, tag) \
+                 SELECT mr.right_media_id, ? FROM media_relations mr \
+                 WHERE mr.left_media_id = ? AND mr.role = 'catalog'",
+            )
+            .bind(tag)
+            .bind(collection_id)
+            .execute(
+                &state
+                    .ctx
+                    .db,
+            )
+            .await
+            {
+                warn!(addon = %id, catalog = %local_id, tag = %tag, error = %e, "failed to apply catalog tag");
             }
         }
     }
@@ -924,6 +884,20 @@ pub async fn purge_addon_catalog(
 
     let collection_id = row.collection_id;
 
+    // Collect playlist IDs BEFORE deleting relations (they join on media_relations)
+    let playlist_ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT DISTINCT m.id FROM media m \
+         JOIN media_relations r ON r.right_media_id = m.id \
+         WHERE r.role = 'catalog' AND m.kind = 'playlist' AND r.left_media_id = ?",
+    )
+    .bind(collection_id)
+    .fetch_all(
+        &state
+            .ctx
+            .db,
+    )
+    .await?;
+
     // Delete catalog memberships
     let relation_count: i64 = sqlx::query(
         "DELETE FROM media_relations WHERE left_media_id = ? AND role = 'catalog'",
@@ -937,20 +911,8 @@ pub async fn purge_addon_catalog(
     .await?
     .rows_affected() as i64;
 
-    // Delete orphaned playlists (reuse existing logic scoped to this collection)
+    // Delete orphaned playlists
     let mut playlist_count = 0i64;
-    let playlist_ids: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT DISTINCT m.id FROM media m \
-         JOIN media_relations r ON r.right_media_id = m.id \
-         WHERE r.role = 'catalog' AND m.kind = 'playlist' AND r.left_media_id = ?",
-    )
-    .bind(collection_id)
-    .fetch_all(
-        &state
-            .ctx
-            .db,
-    )
-    .await?;
     for pid in &playlist_ids {
         if let Err(e) = MediaRelation::delete_by_left_id(
             &state
@@ -1035,12 +997,26 @@ pub async fn set_user_addons(
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::integration_test::{auth_header_with_token, authenticated_server};
+    use crate::db::{
+        CollectionKind, CollectionMediaKind, Media, MediaKind as DbMediaKind,
+        NonEmptyString,
+    };
+    use crate::{
+        db,
+        integration_test::{
+            auth_header_with_token, authenticated_server, new_test_server,
+        },
+    };
     use async_trait::async_trait;
+    use chrono::Utc;
     use http::header::HeaderValue;
-    use remux_sdks::remux::MediaKind;
+    use remux_sdks::remux::{
+        CollectionFilter, FilterGroup, FilterMatchMode, FilterRule, MediaKind, SetOp,
+    };
+    use remux_sdks::stremio::ResourceType;
     use serde_json::json;
     use std::sync::Arc;
+    use uuid::Uuid;
 
     struct ManifestKind(Vec<remux_sdks::stremio::MediaType>);
 
@@ -1622,5 +1598,253 @@ mod test {
             }))
             .await;
         resp.assert_status(http::StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn tmdb_client_works_without_addon_row() {
+        // TMDB is a system addon that cannot be disabled. The client should be
+        // available whenever an API key is configured, regardless of whether
+        // the addon row exists in the database (e.g. fresh install before migrations).
+        let (server, ctx, token) = authenticated_server().await;
+        let (h, v) = auth(&token);
+        let seeded = tmdb_addon_id(
+            &ctx.0
+                .db,
+        )
+        .await;
+
+        // Delete the TMDB addon row directly (simulating a state before the row is created)
+        sqlx::query("DELETE FROM addons WHERE id = ?1")
+            .bind(seeded)
+            .execute(
+                &ctx.0
+                    .db,
+            )
+            .await
+            .unwrap();
+        ctx.0
+            .addons
+            .reload(
+                &ctx.0
+                    .db,
+                &ctx.0
+                    .config,
+            )
+            .await
+            .unwrap();
+
+        // The client should still work because it reads the API key from Settings, not from the addon row
+        assert!(
+            crate::common::tmdb_client(&ctx.0)
+                .await
+                .is_some(),
+            "tmdb_client should work without the addon row"
+        );
+
+        // Re-create the addon row to restore normal state for other tests
+        let now = Utc::now().naive_utc();
+        let addon = Addon {
+            id: seeded,
+            name: "TMDB".to_string(),
+            preset: crate::addons::AddonPresetRef {
+                kind: "tmdb".to_string(),
+                config: serde_json::Value::Null.into(),
+            },
+            resources: vec![
+                ResourceType::Meta,
+                ResourceType::Search,
+                ResourceType::Catalog,
+            ],
+            types: vec![],
+            enabled: true,
+            priority: 0,
+            created_at: now,
+            updated_at: now,
+            system: true,
+            is_default: true,
+            http_redirect_stream: false,
+            subtitle_extraction: false,
+            probe_on_scan: false,
+            service_filter: vec![],
+        };
+        addon
+            .insert(
+                &ctx.0
+                    .db,
+            )
+            .await
+            .unwrap();
+        ctx.0
+            .addons
+            .reload(
+                &ctx.0
+                    .db,
+                &ctx.0
+                    .config,
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn frozen_catalog_hides_smart_collection_instantly() {
+        let (_server, guard) = new_test_server()
+            .await
+            .unwrap();
+        let db = &guard
+            .0
+            .db;
+        let addon_id = Uuid::new_v4();
+        let local_id = "popular_movies";
+        let cat_id = Uuid::new_v5(&addon_id, local_id.as_bytes());
+
+        let imdb = NonEmptyString::try_new("tt446201".to_string()).unwrap();
+        let mut item = Media {
+            id: crate::common::stable_media_uuid(&DbMediaKind::Series, imdb.as_str()),
+            title: "Item".into(),
+            kind: DbMediaKind::Series,
+            external_ids: db::ExternalIds {
+                imdb: Some(imdb),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        item.save(db)
+            .await
+            .unwrap();
+
+        sqlx::query(
+            "INSERT INTO media_relations (relation_id, left_media_id, right_media_id, role, weight) \
+             VALUES (?1, ?2, ?3, 'catalog', 0)",
+        )
+        .bind(Uuid::new_v5(&cat_id, item.id.as_bytes()))
+        .bind(cat_id)
+        .bind(item.id)
+        .execute(db).await.unwrap();
+
+        let filter = CollectionFilter {
+            match_mode: FilterMatchMode::All,
+            groups: vec![FilterGroup {
+                match_mode: FilterMatchMode::All,
+                rules: vec![FilterRule::Catalog {
+                    op: SetOp::In,
+                    catalog_ids: vec![cat_id],
+                }],
+            }],
+        };
+        let mut coll = Media {
+            title: "Catalog View".into(),
+            kind: DbMediaKind::Collection,
+            collection_kind: Some(CollectionKind::Smart),
+            collection_media_kind: Some(CollectionMediaKind::Series),
+            collection_smart_filter: Some(filter),
+            ..Default::default()
+        };
+        coll.save(db)
+            .await
+            .unwrap();
+        let coll_id = coll.id;
+
+        let q = || async {
+            Media::get_by_filter(
+                db,
+                &db::MediaFilter {
+                    id: Some(vec![coll_id]),
+                    kind: Some(vec![DbMediaKind::Collection]),
+                    exclude_childless: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+            .records
+        };
+
+        assert_eq!(
+            q().await
+                .len(),
+            1,
+            "visible while enabled (absent row)"
+        );
+
+        sqlx::query(
+            "INSERT INTO addon_catalogs (addon_id, catalog_id, collection_id, enabled, max_items, tags, last_refreshed_at, updated_at) \
+             VALUES (?1, ?2, ?3, 0, NULL, '[]', NULL, ?4)",
+        )
+        .bind(addon_id).bind(local_id).bind(cat_id).bind(Utc::now().naive_utc())
+        .execute(db).await.unwrap();
+        assert_eq!(
+            q().await
+                .len(),
+            0,
+            "hidden instantly once frozen"
+        );
+
+        sqlx::query("UPDATE addon_catalogs SET enabled = 1 WHERE addon_id = ?1")
+            .bind(addon_id)
+            .execute(db)
+            .await
+            .unwrap();
+        assert_eq!(
+            q().await
+                .len(),
+            1,
+            "back as soon as unfrozen"
+        );
+
+        let members: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM media_relations WHERE role = 'catalog'",
+        )
+        .fetch_one(db)
+        .await
+        .unwrap();
+        assert_eq!(members, 1, "memberships untouched by the toggle");
+    }
+
+    #[tokio::test]
+    async fn system_guards_with_metadata_list() {
+        let (server, ctx, token) = authenticated_server().await;
+        let (h, v) = auth(&token);
+
+        // 1. GET /addon-kinds still returns TMDB metadata (with its options)
+        let kinds_resp = server
+            .get("/addon-kinds")
+            .add_header(h.clone(), v.clone())
+            .await;
+        kinds_resp.assert_status_ok();
+        let kinds: Vec<AddonMetadata> = kinds_resp.json();
+        let tmdb_meta = kinds
+            .iter()
+            .find(|k| k.id == "tmdb")
+            .expect("TMDB metadata should be present");
+        // TMDB has no options (API key comes from Settings), but the metadata entry exists
+        assert_eq!(tmdb_meta.id, "tmdb");
+        assert_eq!(tmdb_meta.display_name, "TMDB");
+
+        // 2. POST /addons with a system preset returns 409 (conflict)
+        let resp = server
+            .post("/addons")
+            .add_header(h.clone(), v.clone())
+            .expect_failure()
+            .json(&json!({
+                "preset": { "kind": "tmdb", "config": {} },
+                "name": "TMDB Duplicate",
+            }))
+            .await;
+        resp.assert_status(http::StatusCode::CONFLICT);
+
+        // 3. POST /addons/{tmdb} with enabled: false returns 403 (forbidden)
+        let seeded = tmdb_addon_id(
+            &ctx.0
+                .db,
+        )
+        .await;
+        let resp = server
+            .post(&format!("/addons/{seeded}"))
+            .add_header(h, v)
+            .expect_failure()
+            .json(&json!({ "enabled": false }))
+            .await;
+        resp.assert_status(http::StatusCode::FORBIDDEN);
     }
 }

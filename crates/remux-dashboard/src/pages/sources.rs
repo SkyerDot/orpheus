@@ -5,6 +5,7 @@ use crate::{
     },
     state::AppState,
 };
+use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
 use dioxus_icons::lucide::Settings2;
 use remux_sdks::{
@@ -18,6 +19,17 @@ use remux_sdks::{
 };
 use url::Url;
 use uuid::Uuid;
+
+/// Format an ISO-8601 UTC timestamp for display.
+fn format_last_updated(iso_str: &str) -> String {
+    DateTime::parse_from_rfc3339(iso_str)
+        .map(|dt| {
+            dt.with_timezone(&Utc)
+                .format("%Y-%m-%d %H:%M UTC")
+                .to_string()
+        })
+        .unwrap_or_else(|_| iso_str.to_string())
+}
 
 #[component]
 pub fn SourcesPage(app_state: AppState) -> Element {
@@ -443,9 +455,24 @@ pub fn SourcesPage(app_state: AppState) -> Element {
                                 span { class: "field-hint", "User sources only provide per-user resources. Catalogs and metadata apply to the whole library, so add those sources on the Global tab." }
                             }
                             div { class: "addon-kind-list",
-                                for k in kinds.read().clone().into_iter().filter(|k| {
-                                    if *active_tab.read() == "user" { !k.supported_resources_user.is_empty() } else { true }
-                                }) {
+                                {
+                                    // Filter out system addon kinds that are already installed (e.g. TMDB)
+                                    // to prevent duplicates, since system addons are singletons.
+                                    let global_addons_read = global_addons.read();
+                                    let existing_system_kinds: std::collections::HashSet<String> = global_addons_read
+                                        .iter()
+                                        .filter(|a| a.system)
+                                        .map(|a| a.kind.clone())
+                                        .collect();
+                                    let active_tab_val = *active_tab.read();
+                                    let filtered_kinds: Vec<_> = kinds.read().clone().into_iter().filter(move |k| {
+                                        let is_user_tab = active_tab_val == "user";
+                                        let has_resources = if is_user_tab { !k.supported_resources_user.is_empty() } else { true };
+                                        let not_installed = !existing_system_kinds.contains(&k.id);
+                                        has_resources && not_installed
+                                    }).collect();
+                                    filtered_kinds
+                                }.into_iter().map(|k| {
                                     {
                                         let k_id = k.id.clone();
                                         let k_id_cfg = k.id.clone();
@@ -499,7 +526,7 @@ pub fn SourcesPage(app_state: AppState) -> Element {
                                             }
                                         }
                                     }
-                                }
+                                })
                             }
                         } else {
                             if let Some(meta) = &selected_kind_meta {
@@ -778,19 +805,20 @@ pub fn SourcesPage(app_state: AppState) -> Element {
                                                                 let cid_max = cid.clone();
                                                                 let cid_tags = cid.clone();
                                                                 let cid_purge = cid.clone();
-                                                                let is_builtin_source = is_builtin;
+                                                                // Catalog controls are always editable, even for built-in sources.
+                                                                // Only source-level controls (enable switch, delete, resources, types) are disabled for built-ins.
                                                                 let (enabled, max_str, tags_str) = edit_catalog_settings.read()
                                                                     .get(&cid)
                                                                     .cloned()
                                                                     .unwrap_or((false, String::new(), String::new()));
                                                                 let last_updated = cat.remux.as_ref().and_then(|r| r.last_refreshed_at.clone());
+                                                                let last_updated_display = last_updated.as_deref().map(format_last_updated);
                                                                 rsx! {
                                                                     tr {
                                                                         td { class: "catalog-name", "{cat.name}" }
                                                                         td {
                                                                             Switch {
                                                                                 checked: enabled,
-                                                                                disabled: is_builtin_source,
                                                                                 on_change: move |v| {
                                                                                     let mut map = edit_catalog_settings.write();
                                                                                     let entry = map.entry(cid_toggle.clone()).or_default();
@@ -804,7 +832,6 @@ pub fn SourcesPage(app_state: AppState) -> Element {
                                                                                 placeholder: "Max items",
                                                                                 value: "{max_str}",
                                                                                 min: "1",
-                                                                                disabled: is_builtin_source,
                                                                                 oninput: move |e| {
                                                                                     let mut map = edit_catalog_settings.write();
                                                                                     let entry = map.entry(cid_max.clone()).or_default();
@@ -817,7 +844,6 @@ pub fn SourcesPage(app_state: AppState) -> Element {
                                                                                 class: "form-input",
                                                                                 placeholder: "tag1, tag2",
                                                                                 value: "{tags_str}",
-                                                                                disabled: is_builtin_source,
                                                                                 oninput: move |e| {
                                                                                     let mut map = edit_catalog_settings.write();
                                                                                     let entry = map.entry(cid_tags.clone()).or_default();
@@ -826,7 +852,7 @@ pub fn SourcesPage(app_state: AppState) -> Element {
                                                                             }
                                                                         }
                                                                         td {
-                                                                            if let Some(dt) = last_updated {
+                                                                            if let Some(dt) = last_updated_display {
                                                                                 span { "{dt}" }
                                                                             } else {
                                                                                 span { class: "text-muted", "Never" }
@@ -893,10 +919,16 @@ pub fn SourcesPage(app_state: AppState) -> Element {
                                                         .map(|t| t.trim().to_string())
                                                         .filter(|t| !t.is_empty())
                                                         .collect();
+                                                    // Sentinel: empty input -> Some(0) to clear the cap (store NULL)
+                                                    let max_items = if max_str.trim().is_empty() {
+                                                        Some(0)
+                                                    } else {
+                                                        max_str.trim().parse::<i64>().ok().map(|n| if n > 0 { n } else { 0 })
+                                                    };
                                                     UpdateAddonCatalogRequest {
                                                         catalog_id: catalog_id.clone(),
                                                         enabled: *enabled,
-                                                        max_items: max_str.trim().parse::<i64>().ok().filter(|&n| n > 0),
+                                                        max_items,
                                                         tags: Some(tags),
                                                     }
                                                 })
@@ -969,7 +1001,7 @@ pub fn SourcesPage(app_state: AppState) -> Element {
                         span { class: "modal-title", "Delete Source" }
                     }
                     div { class: "modal-body",
-                        p { style: "font-size:.85rem", "Are you sure you want to delete this source? Catalog data from this source will be removed on the next import." }
+                        p { style: "font-size:.85rem", "Are you sure you want to delete this source? Catalogs from this source are frozen (not deleted) and their data can be removed explicitly per catalog using 'Delete catalog data'." }
                     }
                     div { class: "modal-footer",
                         button {
