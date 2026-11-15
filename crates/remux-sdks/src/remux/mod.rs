@@ -474,6 +474,18 @@ pub struct AddonCatalogDto {
     pub tags: Vec<String>,
     /// Deterministic UUID of the catalog collection item for this catalog.
     pub collection_id: Option<Uuid>,
+    /// Remux-specific extensions (non-Jellyfin fields).
+    #[serde(rename = "remux")]
+    pub remux: Option<AddonCatalogRemux>,
+}
+
+/// Remux-specific extensions for AddonCatalogDto.
+#[skip_serializing_none]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddonCatalogRemux {
+    /// When this catalog was last successfully refreshed (null = never).
+    pub last_refreshed_at: Option<String>,
 }
 
 /// Per-catalog settings update — one entry in `POST /addons/{id}/catalogs`.
@@ -7458,6 +7470,26 @@ impl Endpoint for UpdateAddonCatalogs {
     }
     fn body(&self) -> Body {
         Body::Json(serde_json::to_value(&self.payload).unwrap_or_default())
+    }
+}
+
+/// Purge all catalog data for a specific catalog (destructive).
+/// Deletes media_relations for this catalog, orphaned playlists, and resets last_refreshed_at.
+/// Refuses if the catalog is still enabled.
+/// Does NOT delete media rows or library files.
+#[derive(Debug, Clone)]
+pub struct PurgeAddonCatalog {
+    pub id: Uuid,
+    pub catalog_id: String,
+}
+
+impl Endpoint for PurgeAddonCatalog {
+    type Output = serde_json::Value;
+    fn path(&self) -> String {
+        format!("/addons/{}/catalogs/{}/purge", self.id, self.catalog_id)
+    }
+    fn method(&self) -> Method {
+        Method::POST
     }
 }
 
