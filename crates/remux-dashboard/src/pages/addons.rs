@@ -1,6 +1,7 @@
 use crate::{
     components::{
-        DragAndDropList, EmptyState, FormGroup, LoadingText, Switch, ToggleRow,
+        DragAndDropList, EmptyState, ErrorAlert, FormGroup, LoadingText, Switch,
+        ToggleRow,
     },
     state::AppState,
 };
@@ -40,6 +41,9 @@ pub fn AddonsPage(app_state: AppState) -> Element {
     let mut error: Signal<Option<String>> = use_signal(|| None);
     let mut refresh = use_signal(|| 0_u32);
     let mut active_tab: Signal<&'static str> = use_signal(|| "global");
+    let toggling: Signal<std::collections::HashSet<Uuid>> =
+        use_signal(std::collections::HashSet::new);
+    let mut toggle_error: Signal<Option<String>> = use_signal(|| None);
 
     // Add-addon modal state
     let mut show_create = use_signal(|| false);
@@ -104,6 +108,7 @@ pub fn AddonsPage(app_state: AppState) -> Element {
                     global_addons.set(global);
                     user_addons.set(user);
                     error.set(None);
+                    toggle_error.set(None);
                 }
                 (Err(e), _) | (_, Err(e)) => {
                     error.set(Some(format!("Failed to load addons: {e}")));
@@ -162,6 +167,9 @@ pub fn AddonsPage(app_state: AppState) -> Element {
                             "User"
                         }
                     }
+                    if let Some(err) = toggle_error.read().as_ref() {
+                        ErrorAlert { message: err.clone() }
+                    }
                     {
                         let mut tab_addons = if *active_tab.read() == "global" { global_addons } else { user_addons };
                         let visible: Vec<AddonDto> = tab_addons.read().clone();
@@ -203,18 +211,25 @@ pub fn AddonsPage(app_state: AppState) -> Element {
                                                     }
                                                     Switch {
                                                         checked: addon.enabled,
+                                                        disabled: toggling.read().contains(&id),
                                                         on_change: {
                                                             let client = app_state.clone();
                                                             let mut list = tab_addons;
+                                                            let mut toggling = toggling;
+                                                            let mut toggle_error = toggle_error;
                                                             move |enabled: bool| {
+                                                                if toggling.read().contains(&id) {
+                                                                    return;
+                                                                }
                                                                 // Optimistic: the toggle is the control the admin is using.
                                                                 if let Some(a) = list.write().iter_mut().find(|a| a.id == id) {
                                                                     a.enabled = enabled;
                                                                 }
+                                                                toggling.write().insert(id);
+                                                                toggle_error.set(None);
                                                                 let c = client.clone();
-                                                                let mut err = error;
                                                                 spawn(async move {
-                                                                    if let Err(e) = c
+                                                                    let outcome = c
                                                                         .execute(UpdateAddon {
                                                                             id,
                                                                             payload: UpdateAddonRequest {
@@ -222,10 +237,22 @@ pub fn AddonsPage(app_state: AppState) -> Element {
                                                                                 ..Default::default()
                                                                             },
                                                                         })
-                                                                        .await
-                                                                    {
-                                                                        err.set(Some(format!("Failed to toggle addon: {e}")));
+                                                                        .await;
+                                                                    match outcome {
+                                                                        Ok(updated) => {
+                                                                            // The server's answer is authoritative.
+                                                                            if let Some(a) = list.write().iter_mut().find(|a| a.id == id) {
+                                                                                a.enabled = updated.enabled;
+                                                                            }
+                                                                        }
+                                                                        Err(e) => {
+                                                                            if let Some(a) = list.write().iter_mut().find(|a| a.id == id) {
+                                                                                a.enabled = !enabled;
+                                                                            }
+                                                                            toggle_error.set(Some(format!("Failed to toggle addon: {e}")));
+                                                                        }
                                                                     }
+                                                                    toggling.write().remove(&id);
                                                                 });
                                                             }
                                                         },
