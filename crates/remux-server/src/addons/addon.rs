@@ -1,5 +1,5 @@
 use anyhow::Result;
-use chrono::{NaiveDateTime, Utc};
+use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::collections::HashMap;

@@ -4,7 +4,7 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use chrono::{SecondsFormat, Utc};
+use chrono::Utc;
 use tracing::warn;
 
 use remux_macros::{delete, get, post};
@@ -193,7 +193,7 @@ fn addon_to_dto(addon: Addon, addons: &AddonService) -> AddonDto {
 /// The dashboard filters the "Add source" picker by "kind already present in addons" to prevent duplicates.
 #[get("/addon-kinds")]
 pub async fn list_addon_kinds(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     _session: auth::AdminSession,
 ) -> Result<Json<Vec<AddonMetadata>>> {
     Ok(Json(
@@ -717,6 +717,23 @@ pub async fn get_addon_catalogs(
     Ok(Json(result))
 }
 
+/// Resolve the `max_items` a partial catalog update should store.
+///
+/// `None` means "field absent — leave the stored cap alone"; `Some(0)` is the
+/// dashboard's sentinel for "clear the cap" and must become `None`.
+/// `.map(..).flatten().or(current)` looks equivalent but silently turns an
+/// explicit clear back into the old cap.
+fn resolve_catalog_max_items(
+    requested: Option<i64>,
+    current: Option<i64>,
+) -> Option<i64> {
+    match requested {
+        Some(0) => None,
+        Some(v) => Some(v),
+        None => current,
+    }
+}
+
 /// Batch-update enabled/max_items/tags for an addon's catalogs.
 /// Partial update: only fields present in each request entry are changed.
 /// `enabled: false` alone must not clear `max_items` or `tags`.
@@ -754,7 +771,7 @@ pub async fn update_addon_catalogs(
             &local_id,
         )
         .await?;
-        let (current_enabled, current_max_items, current_tags) = match current {
+        let (_current_enabled, current_max_items, current_tags) = match current {
             Some(row) => {
                 let tags: Vec<String> =
                     serde_json::from_str(&row.tags).unwrap_or_default();
@@ -765,11 +782,7 @@ pub async fn update_addon_catalogs(
 
         // Partial update: only override fields that are explicitly provided
         let enabled = req.enabled; // enabled is required in the request
-        let max_items = req
-            .max_items
-            .map(|v| if v == 0 { None } else { Some(v) })
-            .flatten()
-            .or(current_max_items);
+        let max_items = resolve_catalog_max_items(req.max_items, current_max_items);
         let tags = req
             .tags
             .clone()
@@ -847,7 +860,7 @@ pub async fn purge_addon_catalog(
     _session: auth::AdminSession,
     Path((id, catalog_id)): Path<(Uuid, String)>,
 ) -> Result<Json<serde_json::Value>> {
-    let addon = Addon::get(
+    let _addon = Addon::get(
         &state
             .ctx
             .db,
@@ -1605,8 +1618,7 @@ mod test {
         // TMDB is a system addon that cannot be disabled. The client should be
         // available whenever an API key is configured, regardless of whether
         // the addon row exists in the database (e.g. fresh install before migrations).
-        let (server, ctx, token) = authenticated_server().await;
-        let (h, v) = auth(&token);
+        let (_server, ctx, _token) = authenticated_server().await;
         let seeded = tmdb_addon_id(
             &ctx.0
                 .db,
@@ -1846,5 +1858,159 @@ mod test {
             .json(&json!({ "enabled": false }))
             .await;
         resp.assert_status(http::StatusCode::FORBIDDEN);
+    }
+
+    /// Purging a frozen catalog clears its memberships and catalog-owned
+    /// playlists and resets the last-update stamp, and never touches the
+    /// library items those memberships pointed at.
+    #[tokio::test]
+    async fn purge_clears_only_catalog_data() {
+        let (server, guard, token) = authenticated_server().await;
+        let (h, v) = auth(&token);
+        let db = &guard
+            .0
+            .db;
+
+        let addon_id: Uuid = sqlx::query_scalar(
+            "SELECT id FROM addons WHERE json_extract(preset, '$.kind') = 'deezer'",
+        )
+        .fetch_one(db)
+        .await
+        .unwrap();
+
+        let local = "purge_me";
+        let collection_id = Uuid::new_v5(&addon_id, local.as_bytes());
+        let stamped = Utc::now().naive_utc();
+        sqlx::query(
+            "INSERT INTO addon_catalogs (addon_id, catalog_id, collection_id, enabled, max_items, tags, last_refreshed_at, updated_at) \
+             VALUES (?1, ?2, ?3, 0, NULL, '[]', ?4, ?4)",
+        )
+        .bind(addon_id)
+        .bind(local)
+        .bind(collection_id)
+        .bind(stamped)
+        .execute(db)
+        .await
+        .unwrap();
+
+        let imdb = crate::db::NonEmptyString::try_new("tt990001".to_string()).unwrap();
+        let mut movie = Media {
+            id: crate::common::stable_media_uuid(&DbMediaKind::Movie, imdb.as_str()),
+            kind: DbMediaKind::Movie,
+            title: "Kept Movie".into(),
+            external_ids: crate::db::ExternalIds {
+                imdb: Some(imdb),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        movie
+            .save(db)
+            .await
+            .unwrap();
+
+        let mut playlist = Media {
+            title: "Catalog Playlist".into(),
+            kind: DbMediaKind::Playlist,
+            ..Default::default()
+        };
+        playlist
+            .save(db)
+            .await
+            .unwrap();
+
+        for item in [movie.id, playlist.id] {
+            sqlx::query(
+                "INSERT INTO media_relations (relation_id, left_media_id, right_media_id, role, weight) \
+                 VALUES (?1, ?2, ?3, 'catalog', 0)",
+            )
+            .bind(Uuid::new_v5(&collection_id, item.as_bytes()))
+            .bind(collection_id)
+            .bind(item)
+            .execute(db)
+            .await
+            .unwrap();
+        }
+
+        // An enabled catalog refuses to be purged.
+        sqlx::query("UPDATE addon_catalogs SET enabled = 1 WHERE addon_id = ?1")
+            .bind(addon_id)
+            .execute(db)
+            .await
+            .unwrap();
+        let refused = server
+            .post(&format!("/addons/{addon_id}/catalogs/{local}/purge"))
+            .add_header(h.clone(), v.clone())
+            .expect_failure()
+            .await;
+        refused.assert_status(http::StatusCode::CONFLICT);
+
+        sqlx::query("UPDATE addon_catalogs SET enabled = 0 WHERE addon_id = ?1")
+            .bind(addon_id)
+            .execute(db)
+            .await
+            .unwrap();
+        let resp = server
+            .post(&format!("/addons/{addon_id}/catalogs/{local}/purge"))
+            .add_header(h, v)
+            .await;
+        resp.assert_status_ok();
+        let body: serde_json::Value = resp.json();
+        assert_eq!(body["deleted_relations"], 2);
+        assert_eq!(body["deleted_playlists"], 1);
+
+        assert!(
+            Media::get_by_id(db, &movie.id)
+                .await
+                .unwrap()
+                .is_some(),
+            "library item survives a catalog purge"
+        );
+        assert!(
+            Media::get_by_id(db, &playlist.id)
+                .await
+                .unwrap()
+                .is_none(),
+            "catalog-owned playlist is removed"
+        );
+
+        let left: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM media_relations WHERE left_media_id = ?",
+        )
+        .bind(collection_id)
+        .fetch_one(db)
+        .await
+        .unwrap();
+        assert_eq!(left, 0);
+
+        let stamp: Option<chrono::NaiveDateTime> = sqlx::query_scalar(
+            "SELECT last_refreshed_at FROM addon_catalogs WHERE addon_id = ?1",
+        )
+        .bind(addon_id)
+        .fetch_one(db)
+        .await
+        .unwrap();
+        assert!(stamp.is_none(), "purge resets the last-update date");
+    }
+}
+
+#[cfg(test)]
+mod catalog_max_items_tests {
+    use super::resolve_catalog_max_items;
+
+    #[test]
+    fn absent_field_keeps_the_stored_cap() {
+        assert_eq!(resolve_catalog_max_items(None, Some(50)), Some(50));
+        assert_eq!(resolve_catalog_max_items(None, None), None);
+    }
+
+    #[test]
+    fn sentinel_zero_clears_the_cap() {
+        assert_eq!(resolve_catalog_max_items(Some(0), Some(50)), None);
+    }
+
+    #[test]
+    fn positive_value_replaces_the_cap() {
+        assert_eq!(resolve_catalog_max_items(Some(20), Some(50)), Some(20));
     }
 }

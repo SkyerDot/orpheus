@@ -478,6 +478,63 @@ impl Task for RefreshIndexesTask {
 mod tests {
     use super::*;
 
+    /// The whole point of freezing: the catalog stays in the domain (its data
+    /// is still protected from cleanup) but never enters the work list, so a
+    /// refresh skips it and its memberships survive untouched.
+    #[tokio::test]
+    async fn a_frozen_catalog_is_domain_but_never_work() {
+        let (_server, guard) = crate::integration_test::new_test_server()
+            .await
+            .unwrap();
+        let ctx = &guard.0;
+        let tmdb_id: Uuid = sqlx::query_scalar(
+            "SELECT id FROM addons WHERE json_extract(preset, '$.kind') = 'tmdb'",
+        )
+        .fetch_one(&ctx.db)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "UPDATE addon_catalogs SET enabled = 0 WHERE addon_id = ?1 AND catalog_id = 'popular_movies'",
+        )
+        .bind(tmdb_id)
+        .execute(
+            &ctx.db,
+        )
+        .await
+        .unwrap();
+
+        let plan = plan_catalogs(ctx, CatalogScope::All).await;
+        let frozen = Uuid::new_v5(&tmdb_id, b"popular_movies");
+        let active = Uuid::new_v5(&tmdb_id, b"popular_tv");
+
+        assert!(
+            plan.domain_collection_ids
+                .contains(&frozen)
+        );
+        assert!(
+            plan.protected_collection_ids
+                .contains(&frozen)
+        );
+        assert!(
+            plan.work
+                .iter()
+                .all(|(catalog, _)| catalog.collection_id != frozen),
+            "a frozen catalog never enters the work list"
+        );
+        assert!(
+            plan.work
+                .iter()
+                .any(|(catalog, _)| catalog.collection_id == active),
+            "enabled catalogs still do"
+        );
+        assert!(
+            !plan
+                .protected_collection_ids
+                .contains(&active)
+        );
+    }
+
     #[test]
     fn scope_all_includes_every_addon() {
         assert!(CatalogScope::All.includes(true));

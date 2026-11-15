@@ -1089,3 +1089,132 @@ mod tests {
         assert_eq!(orphans, 0, "every track must link to a saved album");
     }
 }
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+
+    /// Exercises the real cleanup functions the refresh tasks call: a frozen
+    /// catalog keeps every membership and every playlist it owns, while a
+    /// genuinely stale catalog is still swept.
+    #[tokio::test]
+    async fn cleanup_keeps_frozen_catalog_data_and_sweeps_the_rest() {
+        let (_server, guard) = crate::integration_test::new_test_server()
+            .await
+            .unwrap();
+        let db = &guard
+            .0
+            .db;
+
+        let addon_id = Uuid::new_v4();
+        let frozen = Uuid::new_v5(&addon_id, b"frozen");
+        let stale = Uuid::new_v5(&addon_id, b"stale");
+
+        let imdb = db::NonEmptyString::try_new("tt446202".to_string()).unwrap();
+        let mut series = db::Media {
+            id: crate::common::stable_media_uuid(&db::MediaKind::Series, imdb.as_str()),
+            kind: db::MediaKind::Series,
+            title: "Kept".into(),
+            external_ids: db::ExternalIds {
+                imdb: Some(imdb),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        series
+            .save(db)
+            .await
+            .unwrap();
+
+        let mut frozen_playlist = db::Media {
+            title: "Frozen Playlist".into(),
+            kind: db::MediaKind::Playlist,
+            ..Default::default()
+        };
+        frozen_playlist
+            .save(db)
+            .await
+            .unwrap();
+        let mut stale_playlist = db::Media {
+            title: "Stale Playlist".into(),
+            kind: db::MediaKind::Playlist,
+            ..Default::default()
+        };
+        stale_playlist
+            .save(db)
+            .await
+            .unwrap();
+
+        for (catalog, item) in [
+            (frozen, series.id),
+            (stale, series.id),
+            (frozen, frozen_playlist.id),
+            (stale, stale_playlist.id),
+        ] {
+            sqlx::query(
+                "INSERT INTO media_relations (relation_id, left_media_id, right_media_id, role, weight) \
+                 VALUES (?1, ?2, ?3, 'catalog', 0)",
+            )
+            .bind(Uuid::new_v5(&catalog, item.as_bytes()))
+            .bind(catalog)
+            .bind(item)
+            .execute(db)
+            .await
+            .unwrap();
+        }
+
+        let domain: HashSet<Uuid> = [frozen, stale]
+            .into_iter()
+            .collect();
+        let protected: HashSet<Uuid> = [frozen]
+            .into_iter()
+            .collect();
+        let imported: HashSet<Uuid> = HashSet::new();
+
+        prune_orphaned_playlists(db, &imported, &domain, &protected).await;
+        remove_stale_catalog_memberships(db, &imported, &domain, &protected).await;
+
+        let count = |catalog: Uuid| {
+            let db = db.clone();
+            async move {
+                let n: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM media_relations WHERE left_media_id = ?1 AND role = 'catalog'",
+                )
+                .bind(catalog)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+                n
+            }
+        };
+
+        assert_eq!(
+            count(frozen).await,
+            2,
+            "frozen catalog keeps every membership"
+        );
+        assert_eq!(count(stale).await, 0, "stale catalog is swept");
+
+        assert!(
+            db::Media::get_by_id(db, &frozen_playlist.id)
+                .await
+                .unwrap()
+                .is_some(),
+            "frozen playlist survives"
+        );
+        assert!(
+            db::Media::get_by_id(db, &stale_playlist.id)
+                .await
+                .unwrap()
+                .is_none(),
+            "stale playlist is pruned"
+        );
+        assert!(
+            db::Media::get_by_id(db, &series.id)
+                .await
+                .unwrap()
+                .is_some(),
+            "library item is never touched by catalog cleanup"
+        );
+    }
+}

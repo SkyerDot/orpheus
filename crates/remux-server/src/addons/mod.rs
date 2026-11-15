@@ -38,7 +38,7 @@ use crate::{
     db, sdks,
     services::MediaResolveService,
 };
-pub use addon::{Addon, CatalogState, set_user_addon_override, user_addon_override};
+pub use addon::{Addon, set_user_addon_override, user_addon_override};
 use remux_sdks::remuxdb;
 
 pub use remux_sdks::remux::AddonPresetRef;
