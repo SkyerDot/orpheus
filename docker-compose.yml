@@ -1,0 +1,13 @@
+services:
+  orpheus:
+    image: ghcr.io/skerdot/orpheus-server:latest
+    container_name: orpheus
+    restart: unless-stopped
+    ports:
+      - "8099:8099"
+    volumes:
+      - ./orpheus-data:/data
+    environment:
+      - DATA_DIR=/data
+      - HOST=0.0.0.0
+      - PORT=8099

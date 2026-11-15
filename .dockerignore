@@ -1,4 +1,11 @@
-target
-*.sqlite
-config.toml
-.git
+target/
+.git/
+.gitignore
+.github/
+docker-compose.yml
+.dockerignore
+*.md
+*.toml
+Cargo.lock
+crates/
+tests/
