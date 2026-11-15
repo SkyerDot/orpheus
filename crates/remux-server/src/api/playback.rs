@@ -808,7 +808,7 @@ async fn items_playbackinfo_inner(
                 .iter()
                 .find(|s| {
                     s.index == index
-                        && s.type_ == Some(api::MediaStreamType::Subtitle)
+                        && s.type_ == api::MediaStreamType::Subtitle
                         && s.delivery_method
                             == Some(api::SubtitleDeliveryMethod::External)
                 })
@@ -832,7 +832,7 @@ async fn items_playbackinfo_inner(
                 .iter()
                 .any(|s| {
                     s.index == index
-                        && s.type_ == Some(api::MediaStreamType::Subtitle)
+                        && s.type_ == api::MediaStreamType::Subtitle
                         && !s.is_external
                         && s.is_text_subtitle_stream()
                 })
@@ -866,7 +866,7 @@ async fn items_playbackinfo_inner(
             if let Some(video) = source
                 .media_streams
                 .iter_mut()
-                .find(|s| matches!(s.type_, Some(api::MediaStreamType::Video)))
+                .find(|s| matches!(s.type_, api::MediaStreamType::Video))
             {
                 crate::device_profile::annotate_video_display_title(
                     video,
@@ -878,7 +878,7 @@ async fn items_playbackinfo_inner(
 
         // Recompute from codec — never trust the stored DB value (may be stale).
         for s in &mut source.media_streams {
-            if matches!(s.type_, Some(api::MediaStreamType::Subtitle)) {
+            if matches!(s.type_, api::MediaStreamType::Subtitle) {
                 s.is_text_subtitle_stream = s.is_text_subtitle_stream();
             }
         }
@@ -1095,9 +1095,9 @@ async fn items_playbackinfo_inner(
             formats: Some(vec![]),
             required_http_headers: Some(std::collections::HashMap::new()),
             media_streams: vec![api::MediaStream {
-                type_: Some(api::MediaStreamType::Video),
+                type_: api::MediaStreamType::Video,
                 codec: Some("h264".to_string()),
-                is_default: Some(true),
+                is_default: true,
                 index: 0,
                 width: Some(640),
                 height: Some(360),
@@ -1913,7 +1913,7 @@ pub async fn audio_universal(
                     .as_ref(),
                 p.media_streams
                     .iter()
-                    .find(|s| s.type_ == Some(api::MediaStreamType::Audio))
+                    .find(|s| s.type_ == api::MediaStreamType::Audio)
                     .and_then(|s| {
                         s.codec
                             .as_deref()
@@ -2335,13 +2335,13 @@ mod tests {
                 media_streams: vec![
                     MediaStream {
                         codec: Some("h264".to_string()),
-                        type_: Some(MediaStreamType::Video),
+                        type_: MediaStreamType::Video,
                         index: 0,
                         ..Default::default()
                     },
                     MediaStream {
                         codec: Some("flac".to_string()),
-                        type_: Some(MediaStreamType::Audio),
+                        type_: MediaStreamType::Audio,
                         index: 1,
                         ..Default::default()
                     },
@@ -2420,13 +2420,13 @@ mod tests {
                     MediaStream {
                         codec: Some("h264".to_string()),
                         ref_frames: Some(1),
-                        type_: Some(MediaStreamType::Video),
+                        type_: MediaStreamType::Video,
                         index: 0,
                         ..Default::default()
                     },
                     MediaStream {
                         codec: Some("aac".to_string()),
-                        type_: Some(MediaStreamType::Audio),
+                        type_: MediaStreamType::Audio,
                         index: 1,
                         ..Default::default()
                     },
@@ -3823,7 +3823,7 @@ mod tests {
                     .media_streams
                     .push(MediaStream {
                         codec: Some("aac".to_string()),
-                        type_: Some(MediaStreamType::Audio),
+                        type_: MediaStreamType::Audio,
                         index: 1 + offset as i64,
                         language: Some(language.to_string()),
                         ..Default::default()
@@ -4467,7 +4467,7 @@ mod tests {
                     MediaStream {
                         codec: Some("h264".to_string()),
                         ref_frames: Some(1),
-                        type_: Some(MediaStreamType::Video),
+                        type_: MediaStreamType::Video,
                         index: 0,
                         width: Some(1920),
                         height: Some(1080),
@@ -4475,13 +4475,13 @@ mod tests {
                     },
                     MediaStream {
                         codec: Some("aac".to_string()),
-                        type_: Some(MediaStreamType::Audio),
+                        type_: MediaStreamType::Audio,
                         index: 1,
                         ..Default::default()
                     },
                     MediaStream {
                         codec: Some("hdmv_pgs_subtitle".to_string()),
-                        type_: Some(MediaStreamType::Subtitle),
+                        type_: MediaStreamType::Subtitle,
                         index: 2,
                         is_text_subtitle_stream: false,
                         ..Default::default()
@@ -4682,7 +4682,7 @@ mod tests {
                 MediaStream {
                     codec: Some("h264".to_string()),
                     ref_frames: Some(1),
-                    type_: Some(MediaStreamType::Video),
+                    type_: MediaStreamType::Video,
                     index: 0,
                     width: Some(1920),
                     height: Some(1080),
@@ -4690,7 +4690,7 @@ mod tests {
                 },
                 MediaStream {
                     codec: Some("aac".to_string()),
-                    type_: Some(MediaStreamType::Audio),
+                    type_: MediaStreamType::Audio,
                     index: 1,
                     ..Default::default()
                 },
@@ -4931,7 +4931,7 @@ mod tests {
                 MediaStream {
                     codec: Some("h264".to_string()),
                     ref_frames: Some(1),
-                    type_: Some(MediaStreamType::Video),
+                    type_: MediaStreamType::Video,
                     index: 0,
                     width: Some(1920),
                     height: Some(1080),
@@ -4939,14 +4939,14 @@ mod tests {
                 },
                 MediaStream {
                     codec: Some("aac".to_string()),
-                    type_: Some(MediaStreamType::Audio),
+                    type_: MediaStreamType::Audio,
                     index: 1,
                     language: Some("nl".to_string()),
                     ..Default::default()
                 },
                 MediaStream {
                     codec: Some("aac".to_string()),
-                    type_: Some(MediaStreamType::Audio),
+                    type_: MediaStreamType::Audio,
                     index: 2,
                     language: Some("en".to_string()),
                     ..Default::default()
@@ -5095,7 +5095,7 @@ mod tests {
                 MediaStream {
                     codec: Some("h264".to_string()),
                     ref_frames: Some(1),
-                    type_: Some(MediaStreamType::Video),
+                    type_: MediaStreamType::Video,
                     index: 0,
                     width: Some(1920),
                     height: Some(1080),
@@ -5103,14 +5103,14 @@ mod tests {
                 },
                 MediaStream {
                     codec: Some("aac".to_string()),
-                    type_: Some(MediaStreamType::Audio),
+                    type_: MediaStreamType::Audio,
                     index: 1,
                     language: Some("nl".to_string()),
                     ..Default::default()
                 },
                 MediaStream {
                     codec: Some("aac".to_string()),
-                    type_: Some(MediaStreamType::Audio),
+                    type_: MediaStreamType::Audio,
                     index: 2,
                     language: Some("en".to_string()),
                     ..Default::default()
@@ -5191,14 +5191,14 @@ mod tests {
             container: Some(VideoContainer::Mp4),
             media_streams: vec![
                 MediaStream {
-                    type_: Some(MediaStreamType::Audio),
+                    type_: MediaStreamType::Audio,
                     index: 0,
                     language: Some("fre".to_string()),
-                    is_default: Some(true),
+                    is_default: true,
                     ..Default::default()
                 },
                 MediaStream {
-                    type_: Some(MediaStreamType::Audio),
+                    type_: MediaStreamType::Audio,
                     index: 1,
                     language: Some("eng".to_string()),
                     ..Default::default()
@@ -5358,7 +5358,7 @@ mod tests {
 
         let audio = |index: i64, language: &str| MediaStream {
             codec: Some("aac".to_string()),
-            type_: Some(MediaStreamType::Audio),
+            type_: MediaStreamType::Audio,
             index,
             language: Some(language.to_string()),
             ..Default::default()
@@ -5613,7 +5613,7 @@ mod tests {
                 api::MediaStream {
                     codec: Some("h264".to_string()),
                     ref_frames: Some(1),
-                    type_: Some(api::MediaStreamType::Video),
+                    type_: api::MediaStreamType::Video,
                     index: 0,
                     width: Some(1920),
                     height: Some(1080),
@@ -5621,7 +5621,7 @@ mod tests {
                 },
                 api::MediaStream {
                     codec: Some("aac".to_string()),
-                    type_: Some(api::MediaStreamType::Audio),
+                    type_: api::MediaStreamType::Audio,
                     index: 1,
                     ..Default::default()
                 },
@@ -5880,7 +5880,7 @@ mod tests {
                 MediaStream {
                     codec: Some("h264".to_string()),
                     ref_frames: Some(1),
-                    type_: Some(MediaStreamType::Video),
+                    type_: MediaStreamType::Video,
                     index: 0,
                     width: Some(1920),
                     height: Some(1080),
@@ -5888,13 +5888,13 @@ mod tests {
                 },
                 MediaStream {
                     codec: Some("aac".to_string()),
-                    type_: Some(MediaStreamType::Audio),
+                    type_: MediaStreamType::Audio,
                     index: 1,
                     ..Default::default()
                 },
                 MediaStream {
                     codec: Some("subrip".to_string()),
-                    type_: Some(MediaStreamType::Subtitle),
+                    type_: MediaStreamType::Subtitle,
                     index: 2,
                     language: Some("fra".to_string()),
                     is_text_subtitle_stream: true,
@@ -5902,7 +5902,7 @@ mod tests {
                 },
                 MediaStream {
                     codec: Some("subrip".to_string()),
-                    type_: Some(MediaStreamType::Subtitle),
+                    type_: MediaStreamType::Subtitle,
                     index: 3,
                     language: Some("eng".to_string()),
                     is_text_subtitle_stream: true,
@@ -6209,8 +6209,8 @@ mod tests {
             .as_mut()
         {
             for s in &mut pd.media_streams {
-                if matches!(s.type_, Some(crate::api::MediaStreamType::Subtitle)) {
-                    s.is_default = Some(s.index == 3);
+                if matches!(s.type_, crate::api::MediaStreamType::Subtitle) {
+                    s.is_default = s.index == 3;
                 }
             }
             pd.default_subtitle_stream_index = Some(3);
@@ -6355,13 +6355,13 @@ mod tests {
                 media_streams: vec![
                     MediaStream {
                         codec: Some("h264".to_string()),
-                        type_: Some(MediaStreamType::Video),
+                        type_: MediaStreamType::Video,
                         index: 0,
                         ..Default::default()
                     },
                     MediaStream {
                         codec: Some("aac".to_string()),
-                        type_: Some(MediaStreamType::Audio),
+                        type_: MediaStreamType::Audio,
                         index: 1,
                         ..Default::default()
                     },
