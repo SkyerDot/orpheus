@@ -1060,8 +1060,9 @@ impl std::ops::Deref for AddonRuntime {
 
 impl AddonRuntime {
     /// Fetches this addon's live catalog list and merges in its persisted
-    /// per-catalog overrides (enabled/max_items/tags). Catalogs without a
-    /// stored override fall back to the provider's own declared defaults.
+    /// per-catalog overrides (enabled/max_items/tags) from the `addon_catalogs` table.
+    /// Catalogs without a stored override fall back to the provider's own declared defaults.
+    /// Ensures rows exist in `addon_catalogs` for newly discovered catalogs.
     pub async fn resolve_catalogs(
         &self,
         ctx: &AppContext,
@@ -1075,16 +1076,37 @@ impl AddonRuntime {
         let available = catalog
             .catalog_list(ctx)
             .await?;
-        let states = self
-            .row
-            .catalog_states();
         let addon_id = self
             .row
             .id;
+
+        // Fetch persisted catalog states from addon_catalogs table
+        let catalog_rows = db::get_catalog_states(&ctx.db, addon_id).await?;
+        let catalog_state_map: std::collections::HashMap<
+            String,
+            db::AddonCatalogState,
+        > = catalog_rows
+            .into_iter()
+            .filter_map(|row| {
+                row.to_state()
+                    .ok()
+                    .map(|s| {
+                        (
+                            s.catalog_id
+                                .clone(),
+                            s,
+                        )
+                    })
+            })
+            .collect();
+
+        // Ensure rows exist for newly discovered catalogs (INSERT OR IGNORE preserves admin values)
+        db::ensure_catalog_rows(&ctx.db, addon_id, &available).await?;
+
         Ok(available
             .into_iter()
             .map(|info| {
-                let state = states.get(&info.provider_catalog_id);
+                let state = catalog_state_map.get(&info.provider_catalog_id);
                 ResolvedCatalog {
                     catalog_id: make_media_id(addon_id, &info.provider_catalog_id),
                     collection_id: Uuid::new_v5(
@@ -1937,6 +1959,8 @@ impl AddonService {
     }
 
     /// Return the tags configured for a specific catalog within an addon.
+    /// DEPRECATED: Use `db::get_catalog_state` directly for up-to-date tags from the
+    /// `addon_catalogs` table. This fallback reads from the legacy JSON config.
     pub fn catalog_tags(&self, addon_uuid: &str, local_cat_id: &str) -> Vec<String> {
         let Ok(id) = Uuid::parse_str(addon_uuid) else {
             return vec![];
