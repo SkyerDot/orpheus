@@ -331,6 +331,14 @@ pub async fn init_app(
     let remux_web = remux_web.map(|r| r.service);
 
     let addons = addons::AddonService::from_db(&conn, &config).await?;
+
+    // One-time backfill: populate addon_catalogs from existing addons.preset.config["catalogs"] JSON.
+    // Uses INSERT OR IGNORE so it never overwrites admin values already in the table.
+    // Does NOT call catalog_list() — no network.
+    if let Err(e) = db::backfill_catalog_states(&conn).await {
+        tracing::warn!(error = %e, "failed to backfill catalog states");
+    }
+
     let transcode_sessions_dir = resolve_transcode_dir(&config.data_dir);
     let (ws_tx, _) = tokio::sync::broadcast::channel::<ws::WsEvent>(128);
     let mut signals = signals::Signals::default();

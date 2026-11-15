@@ -49,6 +49,7 @@ pub trait IntoApiError: Sized {
     fn context_bad_request(self, detail: &str) -> ApiError;
     fn context_unauthorized(self, detail: &str) -> ApiError;
     fn context_forbidden(self, detail: &str) -> ApiError;
+    fn context_conflict(self, detail: &str) -> ApiError;
     fn context_internal(self, detail: &str) -> ApiError;
     fn context_bad_gateway(self, detail: &str) -> ApiError;
     fn context_not_reachable(self) -> ApiError;
@@ -66,6 +67,9 @@ impl<E: Into<anyhow::Error>> IntoApiError for E {
     }
     fn context_forbidden(self, detail: &str) -> ApiError {
         axum_anyhow::IntoApiError::context_forbidden(self, "Forbidden", detail)
+    }
+    fn context_conflict(self, detail: &str) -> ApiError {
+        axum_anyhow::IntoApiError::context_conflict(self, "Conflict", detail)
     }
     fn context_internal(self, detail: &str) -> ApiError {
         axum_anyhow::IntoApiError::context_internal(
