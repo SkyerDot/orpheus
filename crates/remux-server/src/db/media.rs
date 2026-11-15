@@ -9640,9 +9640,23 @@ fn filter_rule_to_sql(
                 .map(|id| format!("X'{}'", id.simple()))
                 .collect::<Vec<_>>()
                 .join(", ");
+            // Exclude frozen (disabled) catalogs by checking addon_catalogs.enabled = 0.
+            // This is the single choke point for catalog visibility — see
+            // crates/remux-server/src/tasks/catalog_import_shared.rs and the
+            // addon_catalogs migration. A catalog with no row in addon_catalogs
+            // stays visible (absent = enabled). Because
+            // `exclude_childless` re-applies the filter via `apply_filter_rules`,
+            // a smart collection that references only a frozen catalog becomes
+            // empty and vanishes from `/userviews` on the next request — no
+            // refresh, no membership deletion needed. Re-enabling restores the
+            // full contents instantly with zero re-indexing.
             let sql = format!(
                 "media.id IN (SELECT mr.right_media_id FROM media_relations mr \
-                 WHERE mr.role = 'catalog' AND mr.left_media_id IN ({in_clause}))"
+                 WHERE mr.role = 'catalog' \
+                   AND mr.left_media_id IN ({in_clause}) \
+                   AND NOT EXISTS (SELECT 1 FROM addon_catalogs ac \
+                                   WHERE ac.collection_id = mr.left_media_id \
+                                     AND ac.enabled = 0))"
             );
             let negated = matches!(op, SetOp::IsNot | SetOp::NotIn);
             Some((sql, negated))
