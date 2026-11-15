@@ -113,67 +113,6 @@ pub async fn upsert_catalog_state(
     Ok(())
 }
 
-/// Update only the `enabled` field of a catalog.
-pub async fn set_catalog_enabled(
-    db: &SqlitePool,
-    addon_id: Uuid,
-    catalog_id: &str,
-    enabled: bool,
-) -> Result<()> {
-    let now = Utc::now().naive_utc();
-    sqlx::query(
-        "UPDATE addon_catalogs SET enabled = ?1, updated_at = ?2 WHERE addon_id = ?3 AND catalog_id = ?4",
-    )
-    .bind(enabled)
-    .bind(now)
-    .bind(addon_id)
-    .bind(catalog_id)
-    .execute(db)
-    .await?;
-    Ok(())
-}
-
-/// Update only the `max_items` field of a catalog.
-pub async fn set_catalog_max_items(
-    db: &SqlitePool,
-    addon_id: Uuid,
-    catalog_id: &str,
-    max_items: Option<i64>,
-) -> Result<()> {
-    let now = Utc::now().naive_utc();
-    sqlx::query(
-        "UPDATE addon_catalogs SET max_items = ?1, updated_at = ?2 WHERE addon_id = ?3 AND catalog_id = ?4",
-    )
-    .bind(max_items)
-    .bind(now)
-    .bind(addon_id)
-    .bind(catalog_id)
-    .execute(db)
-    .await?;
-    Ok(())
-}
-
-/// Update only the `tags` field of a catalog.
-pub async fn set_catalog_tags(
-    db: &SqlitePool,
-    addon_id: Uuid,
-    catalog_id: &str,
-    tags: &[String],
-) -> Result<()> {
-    let tags_json = serde_json::to_string(tags).unwrap_or_else(|_| "[]".to_string());
-    let now = Utc::now().naive_utc();
-    sqlx::query(
-        "UPDATE addon_catalogs SET tags = ?1, updated_at = ?2 WHERE addon_id = ?3 AND catalog_id = ?4",
-    )
-    .bind(tags_json)
-    .bind(now)
-    .bind(addon_id)
-    .bind(catalog_id)
-    .execute(db)
-    .await?;
-    Ok(())
-}
-
 /// Update `last_refreshed_at` for a catalog (called after successful import).
 pub async fn set_catalog_last_refreshed(
     db: &SqlitePool,
@@ -207,62 +146,6 @@ pub async fn clear_catalog_last_refreshed(
     .bind(catalog_id)
     .execute(db)
     .await?;
-    Ok(())
-}
-
-/// Get all enabled catalog collection IDs for an addon (for refresh planning).
-pub async fn get_enabled_catalog_collection_ids(
-    db: &SqlitePool,
-    addon_id: Uuid,
-) -> Result<Vec<Uuid>> {
-    let ids = sqlx::query_scalar(
-        "SELECT collection_id FROM addon_catalogs WHERE addon_id = ?1 AND enabled = 1",
-    )
-    .bind(addon_id)
-    .fetch_all(db)
-    .await?;
-    Ok(ids)
-}
-
-/// Get all catalog collection IDs for an addon (enabled or disabled, for domain scoping).
-pub async fn get_all_catalog_collection_ids(
-    db: &SqlitePool,
-    addon_id: Uuid,
-) -> Result<Vec<Uuid>> {
-    let ids = sqlx::query_scalar(
-        "SELECT collection_id FROM addon_catalogs WHERE addon_id = ?1",
-    )
-    .bind(addon_id)
-    .fetch_all(db)
-    .await?;
-    Ok(ids)
-}
-
-/// Get disabled (frozen) catalog collection IDs for an addon.
-pub async fn get_frozen_catalog_collection_ids(
-    db: &SqlitePool,
-    addon_id: Uuid,
-) -> Result<Vec<Uuid>> {
-    let ids = sqlx::query_scalar(
-        "SELECT collection_id FROM addon_catalogs WHERE addon_id = ?1 AND enabled = 0",
-    )
-    .bind(addon_id)
-    .fetch_all(db)
-    .await?;
-    Ok(ids)
-}
-
-/// Delete a catalog state row (used when purging catalog data).
-pub async fn delete_catalog_state(
-    db: &SqlitePool,
-    addon_id: Uuid,
-    catalog_id: &str,
-) -> Result<()> {
-    sqlx::query("DELETE FROM addon_catalogs WHERE addon_id = ?1 AND catalog_id = ?2")
-        .bind(addon_id)
-        .bind(catalog_id)
-        .execute(db)
-        .await?;
     Ok(())
 }
 
