@@ -11,16 +11,16 @@ use remux_macros::{delete, get, post};
 use uuid::Uuid;
 
 use crate::{
-    AppState, IntoApiError, OptionExt, ResultExt,
+    AppState, OptionExt, ResultExt,
     addons::{
         Addon, AddonCapabilities, AddonCatalogDto, AddonDto, AddonMetadata,
         AddonPreset, AddonService, CreateAddonRequest, UpdateAddonCatalogRequest,
         UpdateAddonRequest, registered_presets, set_user_addon_override,
         user_addon_override,
     },
-    db::{MediaKind as DbMediaKind, auth},
+    db::{Media, MediaKind as DbMediaKind, MediaRelation, addon_catalog, auth},
 };
-use axum_anyhow::ApiResult as Result;
+use axum_anyhow::{ApiResult as Result, IntoApiError as AxumIntoApiError};
 
 type CapabilitySnapshot = (Vec<remux_sdks::stremio::ResourceType>, Vec<DbMediaKind>);
 
@@ -189,14 +189,32 @@ fn addon_to_dto(addon: Addon, addons: &AddonService) -> AddonDto {
 
 /// List metadata for every registered addon kind. Drives the dashboard's
 /// "add addon" picker and form renderer.
+/// Excludes system presets that are already installed (e.g. TMDB) to prevent duplicates.
 #[get("/addon-kinds")]
 pub async fn list_addon_kinds(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     _session: auth::AdminSession,
 ) -> Result<Json<Vec<AddonMetadata>>> {
+    let addons = Addon::list(
+        &state
+            .ctx
+            .db,
+    )
+    .await?;
+    let system_preset_kinds: std::collections::HashSet<String> = addons
+        .iter()
+        .filter(|a| a.system)
+        .map(|a| {
+            a.preset
+                .kind
+                .clone()
+        })
+        .collect();
+
     Ok(Json(
         registered_presets()
             .iter()
+            .filter(|p| !system_preset_kinds.contains(p.id()))
             .map(|p| p.metadata())
             .collect(),
     ))
@@ -276,6 +294,31 @@ pub async fn create_addon(
             )
         })
         .context_bad_request("Unknown addon kind")?;
+
+    // Reject creating a second instance of a system preset (e.g. TMDB).
+    // System addons are singletons — only one can exist.
+    let existing_system = Addon::list(
+        &state
+            .ctx
+            .db,
+    )
+    .await?
+    .into_iter()
+    .find(|a| {
+        a.system
+            && a.preset
+                .kind
+                == payload
+                    .preset
+                    .kind
+    });
+    if existing_system.is_some() {
+        return Err(
+            anyhow::anyhow!("A system addon of this kind already exists")
+                .context_conflict("Conflict", "System addon already exists"),
+        );
+    }
+
     let addon_id = Uuid::new_v4();
     let normalized_config = preset
         .normalize_cfg(
@@ -437,6 +480,10 @@ pub async fn update_addon(
         addon.name = name;
     }
     if let Some(enabled) = enabled {
+        if addon.system && !enabled {
+            return Err(anyhow::anyhow!("Cannot disable a system addon")
+                .context_forbidden("Forbidden", "System addons cannot be disabled"));
+        }
         addon.enabled = enabled;
     }
     if let Some(priority) = priority {
@@ -570,7 +617,7 @@ pub async fn delete_addon(
 
     if addon_row.system {
         return Err(anyhow::anyhow!("Cannot delete a system addon")
-            .context_forbidden("Forbidden"));
+            .context_forbidden("Forbidden", "Cannot delete a system addon"));
     }
 
     // Purge the addon's index (removes e.g. IPTV channels) before deleting.
@@ -632,22 +679,59 @@ pub async fn get_addon_catalogs(
         .await
         .context_not_reachable()?;
 
+    // Fetch persisted catalog states from addon_catalogs table for last_refreshed_at
+    let catalog_rows = addon_catalog::get_catalog_states(
+        &state
+            .ctx
+            .db,
+        id,
+    )
+    .await?;
+    let catalog_state_map: std::collections::HashMap<
+        String,
+        addon_catalog::AddonCatalogState,
+    > = catalog_rows
+        .into_iter()
+        .filter_map(|row| {
+            row.to_state()
+                .ok()
+                .map(|s| {
+                    (
+                        s.catalog_id
+                            .clone(),
+                        s,
+                    )
+                })
+        })
+        .collect();
+
     let result = resolved
         .into_iter()
-        .map(|c| AddonCatalogDto {
-            catalog_id: c.catalog_id,
-            name: c.name,
-            enabled: c.enabled,
-            max_items: c.max_items,
-            tags: c.tags,
-            collection_id: Some(c.collection_id),
+        .map(|c| {
+            let extra = catalog_state_map.get(&c.provider_catalog_id);
+            AddonCatalogDto {
+                catalog_id: c.catalog_id,
+                name: c.name,
+                enabled: c.enabled,
+                max_items: c.max_items,
+                tags: c.tags,
+                collection_id: Some(c.collection_id),
+                // Add last_refreshed_at under remux namespace per AGENTS.md
+                remux: extra.map(|e| remux_sdks::remux::AddonCatalogRemux {
+                    last_refreshed_at: e
+                        .last_refreshed_at
+                        .map(|dt| dt.to_string()),
+                }),
+            }
         })
         .collect();
 
     Ok(Json(result))
 }
 
-/// Batch-update enabled/max_items for an addon's catalogs.
+/// Batch-update enabled/max_items/tags for an addon's catalogs.
+/// Partial update: only fields present in each request entry are changed.
+/// `enabled: false` alone must not clear `max_items` or `tags`.
 #[post("/addons/{id}/catalogs")]
 pub async fn update_addon_catalogs(
     State(state): State<AppState>,
@@ -655,7 +739,8 @@ pub async fn update_addon_catalogs(
     Path(id): Path<Uuid>,
     Json(payload): Json<Vec<UpdateAddonCatalogRequest>>,
 ) -> Result<StatusCode> {
-    let mut addon = Addon::get(
+    // Verify addon exists
+    let _addon = Addon::get(
         &state
             .ctx
             .db,
@@ -664,66 +749,118 @@ pub async fn update_addon_catalogs(
     .await?
     .context_not_found("Addon not found")?;
 
-    let prefix = format!("addon:{id}:");
-    let mut states = addon.catalog_states();
-
     for req in &payload {
         let local_id = req
             .catalog_id
-            .strip_prefix(&prefix)
+            .strip_prefix(&format!("addon:{id}:"))
             .unwrap_or(&req.catalog_id)
             .to_string();
-        let new_tags = req
+
+        // Fetch current state from addon_catalogs table for partial update
+        let current = addon_catalog::get_catalog_state(
+            &state
+                .ctx
+                .db,
+            id,
+            &local_id,
+        )
+        .await?;
+        let (current_enabled, current_max_items, current_tags) = match current {
+            Some(row) => {
+                let tags: Vec<String> =
+                    serde_json::from_str(&row.tags).unwrap_or_default();
+                (row.enabled, row.max_items, tags)
+            }
+            None => (true, None, Vec::new()), // Default: enabled, no max_items, no tags
+        };
+
+        // Partial update: only override fields that are explicitly provided
+        let enabled = req.enabled; // enabled is required in the request
+        let max_items = req
+            .max_items
+            .or(current_max_items);
+        let tags = req
             .tags
             .clone()
-            .unwrap_or_else(|| {
-                states
-                    .get(&local_id)
-                    .map(|s| {
-                        s.tags
-                            .clone()
-                    })
-                    .unwrap_or_default()
-            });
-        states.insert(
-            local_id.clone(),
-            crate::addons::CatalogState {
-                enabled: req.enabled,
-                max_items: req.max_items,
-                tags: new_tags.clone(),
-            },
-        );
+            .unwrap_or_else(|| current_tags.clone());
+
+        let collection_id = Uuid::new_v5(&id, local_id.as_bytes());
+
+        // Upsert to addon_catalogs table
+        addon_catalog::upsert_catalog_state(
+            &state
+                .ctx
+                .db,
+            id,
+            &local_id,
+            collection_id,
+            enabled,
+            max_items,
+            &tags,
+            None, // last_refreshed_at unchanged
+        )
+        .await?;
 
         // Apply tags immediately to all media already in this catalog.
-        let collection_id = Uuid::new_v5(&id, local_id.as_bytes());
-        for tag in &new_tags {
-            if let Err(e) = sqlx::query(
-                "INSERT OR IGNORE INTO media_tags (media_id, tag) \
-                 SELECT mr.right_media_id, ? FROM media_relations mr \
-                 WHERE mr.left_media_id = ? AND mr.role = 'catalog'",
-            )
-            .bind(tag)
-            .bind(collection_id)
-            .execute(
-                &state
-                    .ctx
-                    .db,
-            )
-            .await
-            {
-                warn!(addon = %id, catalog = %local_id, tag = %tag, error = %e, "failed to apply catalog tag");
+        // We need to sync tags: remove old provider tags not in new set, add new ones.
+        let old_provider_tags: std::collections::HashSet<String> = current_tags
+            .iter()
+            .filter(|t| t.starts_with("provider:"))
+            .cloned()
+            .collect();
+        let new_provider_tags: std::collections::HashSet<String> = tags
+            .iter()
+            .filter(|t| t.starts_with("provider:"))
+            .cloned()
+            .collect();
+
+        // Remove tags that are no longer in the catalog config
+        for tag in &old_provider_tags {
+            if !new_provider_tags.contains(tag) {
+                if let Err(e) = sqlx::query(
+                    "DELETE FROM media_tags WHERE tag = ? AND media_id IN (
+                         SELECT mr.right_media_id FROM media_relations mr
+                         WHERE mr.left_media_id = ? AND mr.role = 'catalog'
+                     )",
+                )
+                .bind(tag)
+                .bind(collection_id)
+                .execute(
+                    &state
+                        .ctx
+                        .db,
+                )
+                .await
+                {
+                    warn!(addon = %id, catalog = %local_id, tag = %tag, error = %e, "failed to remove catalog tag");
+                }
+            }
+        }
+
+        // Add new provider tags
+        for tag in &new_provider_tags {
+            if !old_provider_tags.contains(tag) {
+                if let Err(e) = sqlx::query(
+                    "INSERT OR IGNORE INTO media_tags (media_id, tag) \
+                     SELECT mr.right_media_id, ? FROM media_relations mr \
+                     WHERE mr.left_media_id = ? AND mr.role = 'catalog'",
+                )
+                .bind(tag)
+                .bind(collection_id)
+                .execute(
+                    &state
+                        .ctx
+                        .db,
+                )
+                .await
+                {
+                    warn!(addon = %id, catalog = %local_id, tag = %tag, error = %e, "failed to apply catalog tag");
+                }
             }
         }
     }
 
-    addon.set_catalog_states(states);
-    addon
-        .update(
-            &state
-                .ctx
-                .db,
-        )
-        .await?;
+    // Reload addon service to pick up changes
     state
         .ctx
         .addons
@@ -738,6 +875,122 @@ pub async fn update_addon_catalogs(
         .await?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Purge all catalog data for a specific catalog (destructive, explicit admin action).
+/// Deletes media_relations for this catalog, orphaned playlists, and resets last_refreshed_at.
+/// Refuses if the catalog is still enabled.
+/// Does NOT delete media rows or library files.
+#[post("/addons/{id}/catalogs/{catalog_id}/purge")]
+pub async fn purge_addon_catalog(
+    State(state): State<AppState>,
+    _session: auth::AdminSession,
+    Path((id, catalog_id)): Path<(Uuid, String)>,
+) -> Result<Json<serde_json::Value>> {
+    let addon = Addon::get(
+        &state
+            .ctx
+            .db,
+        id,
+    )
+    .await?
+    .context_not_found("Addon not found")?;
+
+    let local_id = catalog_id
+        .strip_prefix(&format!("addon:{id}:"))
+        .unwrap_or(&catalog_id)
+        .to_string();
+
+    // Check current state
+    let current = addon_catalog::get_catalog_state(
+        &state
+            .ctx
+            .db,
+        id,
+        &local_id,
+    )
+    .await?;
+    let Some(row) = current else {
+        return Err(anyhow::anyhow!("Catalog not found")
+            .context_not_found("Not Found", "Catalog not found"));
+    };
+
+    if row.enabled {
+        return Err(anyhow::anyhow!(
+            "Cannot purge an enabled catalog. Disable it first."
+        )
+        .context_conflict("Conflict", "Catalog must be disabled before purging"));
+    }
+
+    let collection_id = row.collection_id;
+
+    // Delete catalog memberships
+    let relation_count: i64 = sqlx::query(
+        "DELETE FROM media_relations WHERE left_media_id = ? AND role = 'catalog'",
+    )
+    .bind(collection_id)
+    .execute(
+        &state
+            .ctx
+            .db,
+    )
+    .await?
+    .rows_affected() as i64;
+
+    // Delete orphaned playlists (reuse existing logic scoped to this collection)
+    let mut playlist_count = 0i64;
+    let playlist_ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT DISTINCT m.id FROM media m \
+         JOIN media_relations r ON r.right_media_id = m.id \
+         WHERE r.role = 'catalog' AND m.kind = 'playlist' AND r.left_media_id = ?",
+    )
+    .bind(collection_id)
+    .fetch_all(
+        &state
+            .ctx
+            .db,
+    )
+    .await?;
+    for pid in &playlist_ids {
+        if let Err(e) = MediaRelation::delete_by_left_id(
+            &state
+                .ctx
+                .db,
+            pid,
+        )
+        .await
+        {
+            warn!(playlist = %pid, error = %e, "failed to delete playlist relations");
+        }
+        if let Err(e) = Media::delete(
+            &state
+                .ctx
+                .db,
+            pid,
+        )
+        .await
+        {
+            warn!(playlist = %pid, error = %e, "failed to delete playlist media");
+        } else {
+            playlist_count += 1;
+        }
+    }
+
+    // Reset last_refreshed_at to NULL
+    addon_catalog::clear_catalog_last_refreshed(
+        &state
+            .ctx
+            .db,
+        id,
+        &local_id,
+    )
+    .await?;
+
+    Ok(Json(serde_json::json!({
+        "deleted_relations": relation_count,
+        "deleted_playlists": playlist_count,
+        "message": "Catalog data purged. Library items and files were not affected."
+    })))
 }
 
 /// Get a user's addon override list (ordered by priority).
@@ -1244,7 +1497,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn disabling_tmdb_stops_direct_lookups_until_it_is_enabled_again() {
+    async fn system_addon_cannot_be_disabled() {
         let (server, ctx, token) = authenticated_server().await;
         let (h, v) = auth(&token);
         let id = tmdb_addon_id(
@@ -1259,34 +1512,21 @@ mod test {
                 .is_some()
         );
 
-        server
+        // Attempting to disable a system addon should return 403 Forbidden
+        let resp = server
             .post(&format!("/addons/{id}"))
             .add_header(h.clone(), v.clone())
+            .expect_failure()
             .json(&json!({ "enabled": false }))
-            .await
-            .assert_status_ok();
+            .await;
+        resp.assert_status(http::StatusCode::FORBIDDEN);
+
+        // System addon should still be enabled
         assert!(
-            !ctx.0
+            ctx.0
                 .addons
                 .has_enabled_preset(crate::addons::tmdb::PRESET_ID)
         );
-        assert!(
-            crate::common::tmdb_client(&ctx.0)
-                .await
-                .is_none()
-        );
-        server
-            .get("/remux/watch-providers")
-            .add_header(h.clone(), v.clone())
-            .await
-            .assert_status_ok();
-
-        server
-            .post(&format!("/addons/{id}"))
-            .add_header(h, v)
-            .json(&json!({ "enabled": true }))
-            .await
-            .assert_status_ok();
         assert!(
             crate::common::tmdb_client(&ctx.0)
                 .await
@@ -1321,7 +1561,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn a_second_enabled_tmdb_instance_keeps_the_source_on() {
+    async fn a_second_tmdb_instance_rejected() {
         let (server, ctx, token) = authenticated_server().await;
         let (h, v) = auth(&token);
         let seeded = tmdb_addon_id(
@@ -1330,6 +1570,7 @@ mod test {
         )
         .await;
 
+        // Attempting to create a second TMDB instance should be rejected
         let second = crate::common::get_uuid();
         sqlx::query(
             "INSERT INTO addons (id, name, preset, resources, types, enabled, priority, created_at, updated_at) \
@@ -1350,29 +1591,36 @@ mod test {
             .await
             .unwrap();
 
-        server
-            .post(&format!("/addons/{seeded}"))
-            .add_header(h.clone(), v.clone())
-            .json(&json!({ "enabled": false }))
-            .await
-            .assert_status_ok();
+        // The system addon (seeded) should still be on
         assert!(
             crate::common::tmdb_client(&ctx.0)
                 .await
                 .is_some(),
-            "the second enabled instance keeps the source on"
+            "the system TMDB instance keeps the source on"
         );
 
-        server
-            .post(&format!("/addons/{second}"))
-            .add_header(h, v)
+        // Attempting to disable the system addon should be rejected
+        let resp = server
+            .post(&format!("/addons/{seeded}"))
+            .add_header(h.clone(), v.clone())
+            .expect_failure()
             .json(&json!({ "enabled": false }))
-            .await
-            .assert_status_ok();
-        assert!(
-            crate::common::tmdb_client(&ctx.0)
-                .await
-                .is_none()
-        );
+            .await;
+        resp.assert_status(http::StatusCode::FORBIDDEN);
+
+        // The second instance should also not be disableable via API (it was inserted directly, not through the API)
+        // But we can verify the create endpoint would reject it
+        let (server2, _ctx2, token2) = authenticated_server().await;
+        let (h2, v2) = auth(&token2);
+        let resp = server2
+            .post("/addons")
+            .add_header(h2, v2)
+            .expect_failure()
+            .json(&json!({
+                "preset": { "kind": "tmdb", "config": {} },
+                "name": "TMDB Duplicate",
+            }))
+            .await;
+        resp.assert_status(http::StatusCode::CONFLICT);
     }
 }
