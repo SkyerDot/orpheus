@@ -8,7 +8,9 @@ on:
 
 jobs:
   docker:
-    runs-on: ubuntu-latest
+    # Pinned so the binary's glibc matches the runtime base image in the
+    # Dockerfile (ubuntu:24.04). Bumping one without the other breaks startup.
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
