@@ -4,7 +4,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg ca-certi
 
 WORKDIR /app
 
-COPY remux-server /app/remux-server
+COPY bin/remux-server /app/remux-server
 
 ENV ORPHEUS_DATA_DIR=/data
 ENV ORPHEUS_HOST=0.0.0.0
