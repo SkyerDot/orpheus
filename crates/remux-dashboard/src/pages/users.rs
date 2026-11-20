@@ -725,7 +725,7 @@ pub fn UserForm(
             }
 
             ToggleRow {
-                label: "Allow Remuxing",
+                label: "Allow Transcoding",
                 checked: *enable_remuxing.read(),
                 on_change: move |v| enable_remuxing.set(v),
             }

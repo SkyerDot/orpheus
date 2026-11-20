@@ -97,7 +97,7 @@ pub fn DashboardLayout() -> Element {
     let route = use_route::<Route>();
 
     let page_title = match route {
-        Route::DashboardRoute => "Remux",
+        Route::DashboardRoute => "Orpheus",
         Route::SourcesRoute => "Sources",
         Route::AddonsRouteLegacy => "Sources",
         Route::LibraryRoute => "Library",
@@ -111,7 +111,7 @@ pub fn DashboardLayout() -> Element {
         Route::SettingsBrandingRoute => "Branding",
         Route::SettingsWebhooksRoute => "Webhooks",
         Route::SettingsIntroRoute => "Intro",
-        Route::SettingsRemuxdbRoute => "Remuxdb",
+        Route::SettingsRemuxdbRoute => "OrpheusDB",
         Route::AccessUsersRoute => "Users",
         Route::AccessApiKeysRoute => "API Keys",
         Route::TasksRoute => "Tasks",
@@ -134,7 +134,7 @@ pub fn DashboardLayout() -> Element {
                 class: if *sidebar_open.read() { "sidebar sidebar-open" } else { "sidebar" },
 
                 div { class: "sidebar-brand",
-                    h1 { class: "brand-title", style: "margin:0", "Remux" }
+                    h1 { class: "brand-title", style: "margin:0", "Orpheus" }
                 }
 
                 div { class: "sidebar-nav",
@@ -229,7 +229,7 @@ pub fn DashboardLayout() -> Element {
                             on_click: move |_| { navigator().push(Route::SettingsIntroRoute); sidebar_open.set(false); },
                         }
                         NavSubItem {
-                            label: "Remuxdb",
+                            label: "OrpheusDB",
                             active: route == Route::SettingsRemuxdbRoute,
                             on_click: move |_| { navigator().push(Route::SettingsRemuxdbRoute); sidebar_open.set(false); },
                         }

@@ -3,6 +3,10 @@ name = "remux-dashboard"
 version = "0.0.0"
 edition = "2021"
 
+[[bin]]
+name = "dashboard"
+path = "src/main.rs"
+
 [dependencies]
 dioxus = { version = "0.7", features = ["web", "router"] }
 serde = { version = "1", features = ["derive"] }

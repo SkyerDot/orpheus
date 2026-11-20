@@ -14,7 +14,7 @@ pub mod webhooks;
 
 use remux_sdks::remux::SortMediaSourcesMode;
 
-const DEVICE_SORTING_HINT: &str = "Start playback once on each device to save its profile for future sorting. Remux learns 4K support after 10 minutes of actual 4K playback without video transcoding; paused time and skips do not count. Until then, smaller streams are preferred unless the profile explicitly supports 4K.";
+const DEVICE_SORTING_HINT: &str = "Start playback once on each device to save its profile for future sorting. Orpheus learns 4K support after 10 minutes of actual 4K playback without video transcoding; paused time and skips do not count. Until then, smaller streams are preferred unless the profile explicitly supports 4K.";
 
 fn stream_sorting_description(mode: SortMediaSourcesMode) -> &'static str {
     match mode {

@@ -736,12 +736,12 @@ pub fn SourcesPage(app_state: AppState) -> Element {
                                 if edit_resources.read().contains("stream") {
                                     div { class: "form-group",
                                         ToggleRow {
-                                            label: "Bypass Remux proxy",
-                                            description: "Send compatible HTTP sources directly to the client instead of proxying them through Remux, when the source is played unchanged.",
+                                            label: "Bypass Orpheus proxy",
+                                            description: "Send compatible HTTP sources directly to the client instead of proxying them through Orpheus, when the source is played unchanged.",
                                             checked: *edit_http_redirect_stream.read(),
                                             on_change: move |v| edit_http_redirect_stream.set(v),
                                         }
-                                        span { class: "field-hint", "Streams that FFmpeg processes, whether remuxed into a new container or re-encoded, always run through Remux." }
+                                        span { class: "field-hint", "Streams that FFmpeg processes, whether remuxed into a new container or re-encoded, always run through Orpheus." }
                                     }
                                     div { class: "form-group",
                                         label { class: "form-label", "Bypass proxy service filter" }
@@ -751,7 +751,7 @@ pub fn SourcesPage(app_state: AppState) -> Element {
                                             value: "{edit_service_filter}",
                                             oninput: move |e| edit_service_filter.set(e.value()),
                                         }
-                                        span { class: "field-hint", "Comma-separated list of service IDs (from streamData.service.id) or addon names (from streamData.addon) to bypass Remux's proxy. Leave empty to apply to all." }
+                                        span { class: "field-hint", "Comma-separated list of service IDs (from streamData.service.id) or addon names (from streamData.addon) to bypass Orpheus proxy. Leave empty to apply to all." }
                                     }
                                 }
                                 if edit_kind.as_deref().is_some_and(|k| k.starts_with("opendal")) && edit_resources.read().contains("stream") {

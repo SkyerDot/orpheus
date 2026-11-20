@@ -39,7 +39,7 @@ pub fn MetricsCard(app_state: AppState) -> Element {
     });
 
     rsx! {
-        Card { title: "RemuxDB Metrics",
+        Card { title: "OrpheusDB Metrics",
             if *loading.read() {
                 LoadingText {}
             } else if let Some(err) = error.read().as_ref() {

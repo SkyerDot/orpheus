@@ -665,7 +665,7 @@ pub fn PlaybackSettingsCard(app_state: AppState) -> Element {
 
                         div { class: "field",
                             ToggleRow {
-                                label: "Remuxing",
+                                label: "Transcoding",
                                 description: "Allow the server to remux streams (copy video and audio into a different container). When disabled, pure remux requests fall back to direct play. Audio and video transcoding remain independently controlled. Per-user policy can restrict this further.",
                                 checked: *enable_remuxing.read(),
                                 on_change: move |v| enable_remuxing.set(v),
@@ -1960,27 +1960,27 @@ pub fn RemuxdbSettingsCard(app_state: AppState) -> Element {
     };
 
     rsx! {
-        Card { title: "RemuxDB",
+        Card { title: "OrpheusDB",
             if *loading.read() {
                 LoadingText {}
             } else {
                 form { onsubmit: on_submit, style: "display:flex;flex-direction:column;gap:14px",
                     p { style: "font-size:.8rem;color:var(--text-secondary);line-height:1.5;margin:0",
-                        "Remux DB is an attempt to build a comprehensive media information database for torrents and NZBs by probing the actual media files rather than relying solely on filenames."
+                        "Orpheus DB is an attempt to build a comprehensive media information database for torrents and NZBs by probing the actual media files rather than relying solely on filenames."
                     }
                     p { style: "font-size:.8rem;color:var(--text-secondary);line-height:1.5;margin:0",
                         "This means detailed media information is available before a stream is selected or downloaded. Jellyfin clients can, for example, display available audio and subtitle tracks ahead of time."
                     }
                     p { style: "font-size:.8rem;color:var(--text-secondary);line-height:1.5;margin:0",
-                        "Having this information upfront also enables smarter stream selection. Because the characteristics of each release, such as codecs, resolution, audio tracks, languages, and subtitles are already known, Remux can automatically select streams that best match a user\u{2019}s preferences."
+                        "Having this information upfront also enables smarter stream selection. Because the characteristics of each release, such as codecs, resolution, audio tracks, languages, and subtitles are already known, Orpheus can automatically select streams that best match a user\u{2019}s preferences."
                     }
                     p { style: "font-size:.8rem;color:var(--text-secondary);line-height:1.5;margin:0",
                         "Want to help populate the DB faster? You can run a worker! Join Discord for more info."
                     }
                     div { class: "field",
                         ToggleRow {
-                            label: "Enable RemuxDB",
-                            description: "Submit probe data to RemuxDB after each live probe.",
+                            label: "Enable OrpheusDB",
+                            description: "Submit probe data to OrpheusDB after each live probe.",
                             checked: *enabled.read(),
                             on_change: move |v| enabled.set(v),
                         }

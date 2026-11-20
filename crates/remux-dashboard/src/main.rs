@@ -112,7 +112,7 @@ fn App() -> Element {
                 div { class: "login-page",
                     div { class: "login-card",
                         div { class: "login-header",
-                            a { href: "/", class: "login-brand-label", "Remux" }
+                            a { href: "/", class: "login-brand-label", "Orpheus" }
                             p { class: "connecting", "Starting up…" }
                         }
                     }
@@ -131,7 +131,7 @@ fn App() -> Element {
                         div { class: "login-page",
                             div { class: "login-card",
                                 div { class: "login-header",
-                                    a { href: "/", class: "login-brand-label", "Remux" }
+                                    a { href: "/", class: "login-brand-label", "Orpheus" }
                                     p { class: "connecting", "Starting up…" }
                                 }
                             }
@@ -142,7 +142,7 @@ fn App() -> Element {
                         div { class: "login-page",
                             div { class: "login-card",
                                 div { class: "login-header",
-                                    a { href: "/", class: "login-brand-label", "Remux" }
+                                    a { href: "/", class: "login-brand-label", "Orpheus" }
                                     h1 { class: "login-title", "Admin Dashboard" }
                                 }
                                 div { class: "login-body",
@@ -248,7 +248,7 @@ fn Login(on_login: EventHandler) -> Element {
                         }
                         store_credentials(StoredServer {
                             id: result.server_id,
-                            name: "Remux".to_string(),
+                            name: "Orpheus".to_string(),
                             manual_address: url,
                             access_token: token,
                             user_id: user
@@ -277,7 +277,7 @@ fn Login(on_login: EventHandler) -> Element {
         div { class: "login-page",
             div { class: "login-card",
                 div { class: "login-header",
-                    span { class: "login-brand-label", "Remux" }
+                    span { class: "login-brand-label", "Orpheus" }
                     h1 { class: "login-title", "Admin Dashboard" }
                     p { class: "login-subtitle", "Sign in to continue" }
                 }
@@ -419,7 +419,7 @@ fn Wizard(on_complete: EventHandler) -> Element {
                 }
 
                 div { class: "wizard-header",
-                    span { class: "login-brand-label", "Remux" }
+                    span { class: "login-brand-label", "Orpheus" }
                     h2 { class: "wizard-title",
                         {match *step.read() {
                             0 => "Server Configuration",
@@ -474,7 +474,7 @@ fn Wizard(on_complete: EventHandler) -> Element {
                                         id: "w-name",
                                         r#type: "text",
                                         class: "field-input",
-                                        placeholder: "My Remux Server",
+                                        placeholder: "My Orpheus Server",
                                         value: "{server_name}",
                                         oninput: move |e| server_name.set(e.value()),
                                     }
